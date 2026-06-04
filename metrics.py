@@ -1,0 +1,129 @@
+"""Image-space evaluation metrics for generated DCE volumes.
+
+These are reported (not back-propagated) to gauge how close a generated volume
+is to ground truth. SSIM reuses the 3D implementation from the loss module.
+
+FID (Fréchet Inception Distance) compares the distribution of 2D axial slices
+from predicted vs. reference volumes using Inception-v3 features (via
+torch_fidelity). Lower is better.
+"""
+from __future__ import annotations
+
+import logging
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+
+from .loss.loss import ssim3d
+
+log = logging.getLogger("tier1")
+
+
+def psnr(pred: torch.Tensor, target: torch.Tensor, data_range: float = 2.0) -> torch.Tensor:
+    mse = F.mse_loss(pred, target)
+    return 10.0 * torch.log10(data_range ** 2 / (mse + 1e-12))
+
+
+@torch.no_grad()
+def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
+                 mask: torch.Tensor | None = None) -> dict:
+    """Per-batch metrics. If a mask is given, MAE is also computed inside the ROI."""
+    out = {
+        "ssim": float(ssim3d(pred, target)),
+        "psnr": float(psnr(pred, target)),
+        "mae": float(F.l1_loss(pred, target)),
+    }
+    if mask is not None and mask.sum() > 0:
+        m = mask > 0.5
+        out["mae_roi"] = float((pred[m] - target[m]).abs().mean())
+    return out
+
+
+def aggregate(metric_dicts: list[dict]) -> dict:
+    """Mean over a list of per-batch metric dicts."""
+    if not metric_dicts:
+        return {}
+    keys = metric_dicts[0].keys()
+    return {k: float(sum(d[k] for d in metric_dicts if k in d) /
+                     max(1, sum(k in d for d in metric_dicts))) for k in keys}
+
+
+# ---------------------------------------------------------------------------
+# FID (distribution metric over 2D axial slices)
+# ---------------------------------------------------------------------------
+def _to_uint8_rgb(slice_2d: torch.Tensor) -> torch.Tensor:
+    """(H, W) in [-1, 1] -> (3, H, W) uint8 RGB for Inception."""
+    x = ((slice_2d.clamp(-1, 1) + 1.0) * 127.5).round().to(torch.uint8)
+    return x.unsqueeze(0).expand(3, -1, -1)
+
+
+def volumes_to_slice_tensors(volumes: list[torch.Tensor], slices_per_volume: int = 8,
+                             min_size: int = 64) -> list[torch.Tensor]:
+    """Extract evenly spaced axial slices from (1, D, H, W) volumes."""
+    slices = []
+    for vol in volumes:
+        v = vol[0] if vol.dim() == 4 else vol  # (D, H, W)
+        d = v.shape[0]
+        if d == 0:
+            continue
+        idxs = torch.linspace(0, d - 1, min(slices_per_volume, d)).long().tolist()
+        for i in idxs:
+            sl = v[i]
+            if min(sl.shape) < min_size:
+                sl = F.interpolate(sl[None, None], size=(min_size, min_size),
+                                   mode="bilinear", align_corners=False)[0, 0]
+            slices.append(_to_uint8_rgb(sl.cpu()))
+    return slices
+
+
+class _SliceDataset(Dataset):
+    """torch_fidelity-compatible dataset of RGB uint8 slices."""
+
+    def __init__(self, slices: list[torch.Tensor]):
+        self.slices = slices
+
+    def __len__(self):
+        return len(self.slices)
+
+    def __getitem__(self, i):
+        return self.slices[i]
+
+
+def compute_fid(preds: list[torch.Tensor], targets: list[torch.Tensor],
+                device: torch.device | str = "cpu", slices_per_volume: int = 8,
+                batch_size: int = 32) -> float | None:
+    """FID between predicted and reference slice distributions.
+
+    Requires at least a few slices in each set (torch_fidelity needs enough
+    samples for a stable covariance estimate).
+    """
+    if not preds or not targets:
+        return None
+    pred_slices = volumes_to_slice_tensors(preds, slices_per_volume)
+    tgt_slices = volumes_to_slice_tensors(targets, slices_per_volume)
+    if len(pred_slices) < 2 or len(tgt_slices) < 2:
+        log.warning(f"FID skipped: need >=2 slices per set (got {len(pred_slices)}/{len(tgt_slices)})")
+        return None
+    try:
+        from torch_fidelity import calculate_metrics
+        from torch_fidelity.metric_fid import KEY_METRIC_FID
+    except ImportError:
+        log.warning("torch_fidelity not installed; skipping FID")
+        return None
+
+    use_cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+    try:
+        result = calculate_metrics(
+            input1=_SliceDataset(pred_slices),
+            input2=_SliceDataset(tgt_slices),
+            cuda=use_cuda,
+            batch_size=min(batch_size, len(pred_slices), len(tgt_slices)),
+            fid=True,
+            isc=False, kid=False, prc=False, ppl=False,
+            verbose=False,
+        )
+        return float(result[KEY_METRIC_FID])
+    except Exception as e:
+        log.warning(f"FID computation failed: {e}")
+        return None
