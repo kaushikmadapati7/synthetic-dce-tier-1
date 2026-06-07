@@ -25,7 +25,7 @@ class PreprocessConfig:
     reference: str = "dce"                 # "t2w" | "dce" | "iso"; dce keeps target native
     iso_spacing: tuple = (1.0, 1.0, 1.0)   # used when reference == "iso" (x, y, z mm)
     spatial_size: tuple | None = (32, 192, 192)  # (D, H, W); None = leave as resampled
-    clip_percentiles: tuple = (0.5, 99.5)  # robust intensity window
+    clip_percentiles: tuple = (0.5, 99.9)  # robust intensity window (99.9 upper preserves DCE peak; matches Nyul pc_high)
     adc_clip_value: float | None = 3000.0  # ADC is quantitative; hard clip instead of %iles
     pad_value: float = -1.0                # background after normalization to [-1, 1]
 
@@ -62,7 +62,7 @@ def to_array(img: sitk.Image) -> np.ndarray:
     return sitk.GetArrayFromImage(img).astype(np.float32)
 
 
-def normalize(arr: np.ndarray, percentiles=(0.5, 99.5),
+def normalize(arr: np.ndarray, percentiles=(0.5, 99.9),
               hard_clip: float | None = None) -> np.ndarray:
     """Robust scale to [-1, 1]. If hard_clip given, clip to [0, hard_clip] first."""
     if hard_clip is not None:

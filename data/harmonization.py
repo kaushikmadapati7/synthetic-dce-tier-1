@@ -51,8 +51,8 @@ def _to_unit(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
 @dataclass
 class NyulConfig:
     pc_low: float = 1.0          # lower scale anchor percentile
-    pc_high: float = 99.0        # upper scale anchor percentile
-    landmark_percentiles: tuple = (10, 20, 30, 40, 50, 60, 70, 80, 90)
+    pc_high: float = 99.9        # upper scale anchor percentile (99.9 preserves DCE peak enhancement; see data/sweep_dce_clip.py)
+    landmark_percentiles: tuple = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99)  # 95/99 refine the bright tail now that pc_high=99.9
     i_min: float = 1.0           # standard scale endpoints
     i_max: float = 100.0
 

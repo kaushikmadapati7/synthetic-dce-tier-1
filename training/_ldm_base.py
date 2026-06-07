@@ -30,7 +30,8 @@ def train_vae(args, train_loader, criterion, device):
             vae.train(); t0 = time.time(); agg = {}
             for batch in train_loader:
                 x = batch["target"].to(device)
-                loss, parts = vae.loss(x, kl_weight=args.kl_weight, criterion=criterion)
+                mask = batch["mask"].to(device)
+                loss, parts = vae.loss(x, kl_weight=args.kl_weight, criterion=criterion, mask=mask)
                 opt.zero_grad(); loss.backward(); opt.step()
                 for k, v in {"vae": float(loss), **parts}.items():
                     agg[k] = agg.get(k, 0.0) + v

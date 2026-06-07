@@ -54,9 +54,35 @@ def setup_logging(output_dir: Path):
     fh = logging.FileHandler(output_dir / "train.log"); fh.setFormatter(fmt); log.addHandler(fh)
 
 
+def resolve_medicalnet_weights(args):
+    """Default --medicalnet-weights to the depth-matched MedicalNet file in
+    pretrain/, and warn loudly if the perceptual term is on but no real weights
+    are available (otherwise it silently runs on a randomly-initialized backbone).
+    """
+    if args.perceptual <= 0:
+        return
+    if args.medicalnet_weights is None:
+        cand = Path(f"pretrain/resnet_{args.perceptual_depth}.pth")
+        if cand.exists():
+            args.medicalnet_weights = str(cand)
+            log.info(f"perceptual: using MedicalNet weights {cand}")
+            return
+    elif Path(args.medicalnet_weights).exists():
+        log.info(f"perceptual: using MedicalNet weights {args.medicalnet_weights}")
+        return
+    log.warning(
+        f"perceptual_weight={args.perceptual} but no MedicalNet weights found "
+        f"(--medicalnet-weights={args.medicalnet_weights}, expected e.g. "
+        f"pretrain/resnet_{args.perceptual_depth}.pth). The perceptual term will "
+        f"run on a RANDOMLY-INITIALIZED backbone — pass valid weights or set "
+        f"--perceptual 0 to disable it."
+    )
+
+
 def make_criterion(args, device) -> CustomLoss:
     return CustomLoss(
         l1_weight=args.l1, ssim_weight=args.ssim, perceptual_weight=args.perceptual,
+        roi_weight=args.roi_weight,
         perceptual_depth=args.perceptual_depth, perceptual_shortcut=args.perceptual_shortcut,
         medicalnet_weights=args.medicalnet_weights,
     ).to(device)
@@ -105,6 +131,7 @@ def main():
     set_seed(args.seed)
     device = torch.device(args.device if args.device else
                           ("cuda" if torch.cuda.is_available() else "cpu"))
+    resolve_medicalnet_weights(args)
     (out / "config.json").write_text(json.dumps(vars(args), indent=2))
     log.info(f"device={device}  model={args.model}")
     log.info(f"config: {json.dumps(vars(args))}")
@@ -162,6 +189,9 @@ def parse_args():
     p.add_argument("--perceptual-shortcut", default="A")
     p.add_argument("--medicalnet-weights", default="")
     p.add_argument("--adv-weight", type=float, default=1.0)
+    p.add_argument("--roi-weight", type=float, default=10.0,
+                   help="how much more ROI voxels count in the recon loss (1.0 = off; "
+                        "needs prostate masks in the data)")
     # evaluation
     p.add_argument("--compute-fid", action="store_true", default=True)
     p.add_argument("--no-fid", dest="compute_fid", action="store_false")

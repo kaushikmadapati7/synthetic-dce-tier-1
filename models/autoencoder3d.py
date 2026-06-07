@@ -114,15 +114,18 @@ class AutoencoderKL3D(nn.Module):
         z = posterior.sample()
         return self.decoder(z), posterior
 
-    def loss(self, x, kl_weight: float = 1e-6, criterion=None):
+    def loss(self, x, kl_weight: float = 1e-6, criterion=None, mask=None):
         """Reconstruction + KL.
 
-        criterion: optional callable(pred, target) -> (loss, components_dict),
-        e.g. loss.CustomLoss (perceptual + SSIM + L1). Falls back to plain L1.
+        criterion: optional callable(pred, target, mask=None) -> (loss, components),
+        e.g. loss.CustomLoss (perceptual + SSIM + L1, with optional ROI weighting).
+        Falls back to plain L1. ``mask`` drives ROI emphasis in the criterion —
+        for the LDM pipeline this VAE recon term is where prostate image fidelity
+        is set, since the diffusion loss itself lives in latent space.
         """
         recon, posterior = self(x)
         if criterion is not None:
-            rec, parts = criterion(recon, x)
+            rec, parts = criterion(recon, x, mask)
         else:
             rec = F.l1_loss(recon, x)
             parts = {"recon": rec.item()}

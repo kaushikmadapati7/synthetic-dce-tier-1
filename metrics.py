@@ -37,6 +37,8 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
     if mask is not None and mask.sum() > 0:
         m = mask > 0.5
         out["mae_roi"] = float((pred[m] - target[m]).abs().mean())
+        out["psnr_roi"] = float(psnr(pred[m], target[m]))
+        out["ssim_roi"] = float(ssim3d(pred, target, return_map=True)[m].mean())
     return out
 
 

@@ -35,6 +35,7 @@ def train_gan(args, train_loader, test_loader, criterion, device):
         gan.train(); t0 = time.time(); agg = {}
         for batch in train_loader:
             cond = batch["cond"].to(device); real = batch["target"].to(device)
+            mask = batch["mask"].to(device)
             z = torch.randn(cond.size(0), args.z_dim, device=device)
 
             fake = gan.generator(z, cond_vol=cond)
@@ -43,10 +44,11 @@ def train_gan(args, train_loader, test_loader, criterion, device):
             opt_d.zero_grad(); d_loss.backward(); opt_d.step()
 
             g_loss, parts = g_total_loss(gan.discriminator(fake, cond_vol=cond),
-                                         fake, real, criterion, adv_weight=args.adv_weight)
+                                         fake, real, criterion, adv_weight=args.adv_weight,
+                                         mask=mask)
             opt_g.zero_grad(); g_loss.backward(); opt_g.step()
 
-            for k, v in {"d": float(d_loss), "g": float(g_loss), **parts}.items():
+            for k, v in {"d": float(d_loss.detach()), "g": float(g_loss.detach()), **parts}.items():
                 agg[k] = agg.get(k, 0.0) + v
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
         save_ckpt(args, "gan", gan, epoch, args.epochs)

@@ -29,8 +29,13 @@ def _gaussian_window_3d(window_size: int, sigma: float, channels: int,
 
 
 def ssim3d(x: torch.Tensor, y: torch.Tensor, window_size: int = 7,
-           sigma: float = 1.5, data_range: float = 2.0) -> torch.Tensor:
-    """Mean 3D SSIM. data_range=2.0 matches tanh outputs in [-1, 1]."""
+           sigma: float = 1.5, data_range: float = 2.0,
+           return_map: bool = False) -> torch.Tensor:
+    """3D SSIM. data_range=2.0 matches tanh outputs in [-1, 1].
+
+    Returns the scalar mean SSIM, or the per-voxel SSIM map (same spatial size
+    as the input) when ``return_map`` — used to average SSIM inside an ROI mask.
+    """
     c = x.shape[1]
     w = _gaussian_window_3d(window_size, sigma, c, x.device, x.dtype)
     pad = window_size // 2
@@ -44,7 +49,7 @@ def ssim3d(x: torch.Tensor, y: torch.Tensor, window_size: int = 7,
     c2 = (0.03 * data_range) ** 2
     ssim_map = ((2 * mu_xy + c1) * (2 * sig_xy + c2)) / \
                ((mu_x2 + mu_y2 + c1) * (sig_x + sig_y + c2))
-    return ssim_map.mean()
+    return ssim_map if return_map else ssim_map.mean()
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +210,12 @@ class CustomLoss(nn.Module):
 
     Returns (total_loss, components_dict). Designed to be used directly as the
     Conditional GAN generator reconstruction term and as the VAE recon term.
+
+    ROI emphasis: the prostate is ~1% of the volume, so an unweighted loss is
+    dominated by background. When a ``mask`` is passed to ``forward`` and
+    ``roi_weight > 1``, the L1 term is reweighted so ROI voxels count
+    ``roi_weight``x more, and an extra ROI-SSIM term is added. With no mask (or
+    an empty one) the behaviour is identical to the unweighted loss.
     """
 
     def __init__(
@@ -212,6 +223,7 @@ class CustomLoss(nn.Module):
         l1_weight: float = 1.0,
         ssim_weight: float = 1.0,
         perceptual_weight: float = 1.0,
+        roi_weight: float = 1.0,
         perceptual_depth: int = 18,
         perceptual_shortcut: str = "A",
         medicalnet_weights: str | None = None,
@@ -224,6 +236,7 @@ class CustomLoss(nn.Module):
         self.l1_w = l1_weight
         self.ssim_w = ssim_weight
         self.perc_w = perceptual_weight
+        self.roi_w = roi_weight
         self.ssim_window = ssim_window
         self.ssim_sigma = ssim_sigma
         self.data_range = data_range
@@ -233,12 +246,35 @@ class CustomLoss(nn.Module):
             if perceptual_weight > 0 else None
         )
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor):
-        l1 = F.l1_loss(pred, target)
+    def _has_roi(self, mask):
+        return mask is not None and self.roi_w > 1.0 and mask.sum() > 0
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                mask: torch.Tensor | None = None):
+        use_roi = self._has_roi(mask)
+
+        # L1: reweighted so ROI voxels dominate the gradient (also lifts ROI PSNR)
+        if use_roi:
+            w = 1.0 + (self.roi_w - 1.0) * mask
+            l1 = (w * (pred - target).abs()).sum() / w.sum()
+        else:
+            l1 = F.l1_loss(pred, target)
+
         ssim_l = 1.0 - ssim3d(pred, target, self.ssim_window, self.ssim_sigma,
                               self.data_range)
+        # extra structural term inside the ROI (averaged over mask voxels)
+        if use_roi:
+            smap = ssim3d(pred, target, self.ssim_window, self.ssim_sigma,
+                          self.data_range, return_map=True)
+            m = mask > 0.5
+            ssim_roi_l = 1.0 - smap[m].mean()
+        else:
+            ssim_roi_l = pred.new_zeros(())
+
         perc = (self.perceptual(pred, target)
                 if self.perceptual is not None else pred.new_zeros(()))
-        total = self.l1_w * l1 + self.ssim_w * ssim_l + self.perc_w * perc
+        total = (self.l1_w * l1 + self.ssim_w * ssim_l
+                 + self.ssim_w * ssim_roi_l + self.perc_w * perc)
         return total, {"l1": l1.item(), "ssim": ssim_l.item(),
+                       "ssim_roi": float(ssim_roi_l.detach() if use_roi else 0.0),
                        "perceptual": float(perc.detach())}
