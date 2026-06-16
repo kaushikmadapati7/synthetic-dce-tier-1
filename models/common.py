@@ -67,8 +67,12 @@ class AttentionBlock3D(nn.Module):
         b, c, d, h, w = x.shape
         qkv = self.qkv(self.norm(x))
         q, k, v = qkv.reshape(b, 3, self.heads, c // self.heads, d * h * w).unbind(1)
-        attn = torch.softmax(q.transpose(-1, -2) @ k / math.sqrt(c // self.heads), dim=-1)
-        out = (v @ attn.transpose(-1, -2)).reshape(b, c, d, h, w)
+        # (b, heads, head_dim, N) -> (b, heads, N, head_dim); use the flash/memory-
+        # efficient SDPA kernel so the (N x N) attention matrix is never materialized
+        # (3D grids make N=D*H*W large -> O(N^2) memory OOMs). Same scaling (1/sqrt(dh)).
+        q, k, v = (t.transpose(-1, -2).contiguous() for t in (q, k, v))
+        out = F.scaled_dot_product_attention(q, k, v)        # (b, heads, N, head_dim)
+        out = out.transpose(-1, -2).reshape(b, c, d, h, w)
         return x + self.proj(out)
 
 
