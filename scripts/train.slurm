@@ -84,6 +84,9 @@ source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 set -u
 
+# reduce CUDA fragmentation OOMs (3D attention allocates large transient tensors)
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} model=${MODEL} env=${CONDA_ENV}"
 echo "data_root=${DATA_ROOT}  output_dir=${OUTPUT_DIR}"
 python -c "import torch; print('torch', torch.__version__, 'cuda_avail', torch.cuda.is_available())"
