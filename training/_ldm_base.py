@@ -33,7 +33,7 @@ def train_vae(args, train_loader, criterion, device):
                 mask = batch["mask"].to(device)
                 loss, parts = vae.loss(x, kl_weight=args.kl_weight, criterion=criterion, mask=mask)
                 opt.zero_grad(); loss.backward(); opt.step()
-                for k, v in {"vae": float(loss), **parts}.items():
+                for k, v in {"vae": loss.item(), **parts}.items():
                     agg[k] = agg.get(k, 0.0) + v
             log_epoch(epoch, args.vae_epochs, agg, len(train_loader), time.time() - t0, "VAE")
             save_ckpt(args, "vae", vae, epoch, args.vae_epochs, state_dict=True)
@@ -82,7 +82,7 @@ def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
             cond_ds = downsample_cond(cond, z0.shape[2:])
             loss = ldm.loss(z0, cond=cond_ds)
             opt.zero_grad(); loss.backward(); opt.step()
-            agg["diff"] = agg.get("diff", 0.0) + float(loss)
+            agg["diff"] = agg.get("diff", 0.0) + loss.item()
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
         save_ckpt(args, name, ldm, epoch, args.epochs, state_dict=True)
 
