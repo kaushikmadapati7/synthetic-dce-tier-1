@@ -55,27 +55,39 @@ def setup_logging(output_dir: Path):
 
 
 def resolve_medicalnet_weights(args):
-    """Default --medicalnet-weights to the depth-matched MedicalNet file in
-    pretrain/, and warn loudly if the perceptual term is on but no real weights
-    are available (otherwise it silently runs on a randomly-initialized backbone).
+    """Default --medicalnet-weights to the depth-matched MedicalNet file, and warn
+    loudly if the perceptual term is on but no real weights are available (otherwise
+    it silently runs on a randomly-initialized backbone).
+
+    Because the code dir and the run/CWD may differ on a cluster, the auto-default
+    searches several `pretrain/` roots (in order): $TIER1_PRETRAIN_DIR, the CWD,
+    and the project root next to this package. Pass an absolute --medicalnet-weights
+    to bypass the search entirely.
     """
+    import os
     if args.perceptual <= 0:
         return
+    fname = f"resnet_{args.perceptual_depth}.pth"
     if args.medicalnet_weights is None:
-        cand = Path(f"pretrain/resnet_{args.perceptual_depth}.pth")
-        if cand.exists():
-            args.medicalnet_weights = str(cand)
-            log.info(f"perceptual: using MedicalNet weights {cand}")
-            return
+        roots = []
+        if os.environ.get("TIER1_PRETRAIN_DIR"):
+            roots.append(Path(os.environ["TIER1_PRETRAIN_DIR"]))
+        roots.append(Path("pretrain"))                              # relative to CWD
+        roots.append(Path(__file__).resolve().parent.parent / "pretrain")  # next to the code
+        for cand in (r / fname for r in roots):
+            if cand.exists():
+                args.medicalnet_weights = str(cand)
+                log.info(f"perceptual: using MedicalNet weights {cand}")
+                return
     elif Path(args.medicalnet_weights).exists():
         log.info(f"perceptual: using MedicalNet weights {args.medicalnet_weights}")
         return
     log.warning(
         f"perceptual_weight={args.perceptual} but no MedicalNet weights found "
-        f"(--medicalnet-weights={args.medicalnet_weights}, expected e.g. "
-        f"pretrain/resnet_{args.perceptual_depth}.pth). The perceptual term will "
-        f"run on a RANDOMLY-INITIALIZED backbone — pass valid weights or set "
-        f"--perceptual 0 to disable it."
+        f"(--medicalnet-weights={args.medicalnet_weights}, looked for {fname} in "
+        f"$TIER1_PRETRAIN_DIR / ./pretrain / <code-dir>/pretrain). The perceptual "
+        f"term will run on a RANDOMLY-INITIALIZED backbone — pass valid weights, set "
+        f"$TIER1_PRETRAIN_DIR, or set --perceptual 0 to disable it."
     )
 
 
