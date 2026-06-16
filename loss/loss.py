@@ -162,7 +162,9 @@ class MedicalNetResNet3D(nn.Module):
 def load_medicalnet(depth: int, shortcut_type: str, weights_path: str | None):
     net = MedicalNetResNet3D(depth, shortcut_type)
     if weights_path:
-        ckpt = torch.load(weights_path, map_location="cpu")
+        # weights_only=False: these are trusted local MedicalNet (Med3D) checkpoints,
+        # and torch>=2.6 defaults weights_only=True which rejects their 2019 metadata.
+        ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
         sd = ckpt.get("state_dict", ckpt)
         sd = {k.replace("module.", ""): v for k, v in sd.items()}
         missing, unexpected = net.load_state_dict(sd, strict=False)
