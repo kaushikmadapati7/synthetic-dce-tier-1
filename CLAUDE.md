@@ -23,7 +23,7 @@ python -m tier1_static.main --model ldm_flow --data-root /path/to/Bao_DCE \
 - Perceptual loss needs MedicalNet weights. If `--medicalnet-weights` is omitted, `main.resolve_medicalnet_weights` auto-defaults to the depth-matched file `pretrain/resnet_{perceptual_depth}.pth` (e.g. `pretrain/resnet_18.pth` for the default depth 18) when it exists. If no real weights can be found and `--perceptual > 0`, it logs a **loud warning** and the perceptual term runs on a randomly-initialized backbone (set `--perceptual 0` to disable it outright). The resolved path is recorded in `config.json`.
 - Outputs land in `--output-dir`: `config.json`, `harmonizer.json`, `train.log`, `checkpoints/`, `metrics.json`, `samples/{*.nii.gz, montage.png}`.
 
-Cluster runs use SLURM: `sbatch tier1_static/scripts/train.slurm`, overriding via env vars (`MODEL=gan EPOCHS=200 DATA_ROOT=... sbatch ...`). The slurm script expects a `venv/` at the project root.
+Cluster runs (CHPC) use SLURM: submit from the project root (the dir holding `tier1_static/` and `pretrain/`) with `sbatch tier1_static/scripts/train.slurm`, overriding via env vars (`MODEL=gan EPOCHS=200 DATA_ROOT=... sbatch ...`, plus `CONDA_ENV`, `DCE_PHASE`, `EXTRA_ARGS`). The script targets the **pod partition (H200, `--qos=pod`)** and activates a **conda env** (`CONDA_ENV`, default `kmadapati_env`) — not a venv. Override SBATCH resources on the command line (`sbatch --time=04:00:00 --partition=gpu ...`).
 
 There is **no test suite, linter, or build step** — validation is done by running `main.py` with `--limit` for a quick end-to-end smoke test. A CPU smoke run that exercises data → harmonizer fit → train → ROI loss/metrics → eval (uses the bundled `Bao_intern_package/processed_registered_samples`, itself a silver tree):
 
