@@ -94,12 +94,14 @@ def make_criterion(args, device) -> CustomLoss:
 def build_data(args):
     cfg = PreprocessConfig(reference=args.reference, spatial_size=tuple(args.spatial_size))
     out = Path(args.output_dir)
+    layout = dict(image_subdir=args.image_subdir, mask_subdir=args.mask_subdir)
+    test_hospitals = args.test_hospitals
 
     harmonizer = None
     if args.harmonize:
         harmonizer = Harmonizer()
-        fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in TIER1_TEST_HOSPITALS]
-        fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg)
+        fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
+        fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg, **layout)
         if len(fit_ds) == 0:
             log.warning("no canonical exams found to fit harmonizer; disabling harmonization")
             harmonizer = None
@@ -108,8 +110,13 @@ def build_data(args):
             fit_harmonizer_from_dataset(harmonizer, fit_ds, max_cases=args.harmonize_max)
             harmonizer.save(out / "harmonizer.json")
 
-    train = build_tier1_datasets(args.data_root, cfg, "train", harmonizer)
-    test = build_tier1_datasets(args.data_root, cfg, "test", harmonizer)
+    train = build_tier1_datasets(args.data_root, cfg, "train", harmonizer,
+                                 test_hospitals=test_hospitals, dce_phase=args.dce_phase, **layout)
+    test = build_tier1_datasets(args.data_root, cfg, "test", harmonizer,
+                                test_hospitals=test_hospitals, dce_phase=args.dce_phase, **layout)
+    if len(train) == 0:
+        log.error(f"train split is EMPTY under data-root={args.data_root} "
+                  f"(image_subdir={args.image_subdir}). Check the dataset layout/paths.")
     if args.limit:
         train = torch.utils.data.Subset(train, range(min(args.limit, len(train))))
         test = torch.utils.data.Subset(test, range(min(max(1, args.limit // 4), len(test))))
@@ -160,6 +167,15 @@ def parse_args():
     p.add_argument("--harmonize", action="store_true", default=True)
     p.add_argument("--no-harmonize", dest="harmonize", action="store_false")
     p.add_argument("--harmonize-max", type=int, default=200)
+    # silver layout: <data-root>/<image-subdir|mask-subdir>/<center>/<subject>/
+    p.add_argument("--image-subdir", default="Image_volumes")
+    p.add_argument("--mask-subdir", default="Prostate_masks")
+    p.add_argument("--test-hospitals", nargs="*", default=list(TIER1_TEST_HOSPITALS),
+                   help="held-out test center(s); default jiulong (silver-available)")
+    p.add_argument("--dce-phase", default="early",
+                   help="multi-phase (zhongyiyuan) target phase: 'early' (ph1, default — "
+                        "matches the single-phase centers' early-phase DCE target), "
+                        "'peak' (mask-mean argmax), or an int index. Single-phase centers unaffected.")
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--vae-epochs", type=int, default=50)

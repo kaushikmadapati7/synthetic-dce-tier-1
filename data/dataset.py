@@ -1,15 +1,21 @@
 """Tier-1 datasets: (T2w, DWI, ADC) -> peak-contrast DCE.
 
-Two loaders, because the Bao cohort uses two different file layouts:
+The on-disk source is the Bao_DCE **silver** layer on CHPC, which splits images
+and masks into two parallel trees keyed by <center>/<subject>:
 
-  CanonicalDCEDataset  -> 5 hospitals with fixed canonical names
-                          exam_XXXX/{T2WI,ADC,DWI,DCE}.nii.gz
-                          DCE is single-phase, so it is the target directly.
+    <root>/Image_volumes/<center>/<subject>/   registered volumes (T2 ref space)
+    <root>/Prostate_masks/<center>/<subject>/  prostate_mask.nii.gz
 
-  DescriptorDCEDataset -> zhongyiyuan (GE LAVA-Flex), descriptor-based names
-                          inputs globbed by descriptor; target is the peak phase
-                          among the dynamic series, chosen by mean-intensity
-                          argmax inside the prostate mask (notebook logic).
+Two loaders, because the cohort mixes single- and multi-phase DCE:
+
+  CanonicalDCEDataset  -> single-phase centers (changshu, fuyiyuan, jiulong).
+                          DCE is one registered file, used as the target directly.
+                          files: T2WI, ADC_to_T2WI, DWI_to_T2WI, DCE_to_T2WI
+
+  DescriptorDCEDataset -> zhongyiyuan (GE LAVA-Flex), multi-phase DCE. The target
+                          is the peak post-contrast phase among DCE_ph*_to_T2W,
+                          chosen by mean-intensity argmax inside the prostate mask.
+                          files: T2W, ADC_to_T2W, DWI_to_T2W, DCE_ph1..N_to_T2W
 
 Both return:
     {
@@ -18,35 +24,84 @@ Both return:
       "mask":   FloatTensor (1, D, H, W)  # prostate ROI (zeros if unavailable)
       "id":     str
     }
+
+NOTE on centers: only changshu/fuyiyuan/jiulong/zhongyiyuan exist in the silver
+tree; taizhou/zhangjiagang are bronze-only (raw, unregistered, no masks). The
+default Tier-1 held-out test is therefore `jiulong` (override via --test-hospitals).
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, ConcatDataset
 
 from .preprocessing import (PreprocessConfig, load_sitk, process_case,
                             resample_case, peak_phase_index)
 
-CANONICAL_HOSPITALS = ["changshu", "fuyiyuan", "jiulong", "taizhou", "zhangjiagang"]
+log = logging.getLogger("tier1")
+
+# Silver centers only (taizhou/zhangjiagang are bronze-only and excluded here).
+CANONICAL_HOSPITALS = ["changshu", "fuyiyuan", "jiulong"]
 DESCRIPTOR_HOSPITALS = ["zhongyiyuan"]
-TIER1_TEST_HOSPITALS = ["taizhou", "zhangjiagang"]  # candidate held-out
+TIER1_TEST_HOSPITALS = ["jiulong"]  # held-out test center (see module docstring)
 
 INPUT_KEYS = ("t2w", "dwi", "adc")
+DCE_KEY = "dce"
+
+# Default silver sub-trees under the dataset root.
+IMAGE_SUBDIR = "Image_volumes"
+MASK_SUBDIR = "Prostate_masks"
+
+# Candidate on-disk stems per modality. Single-phase centers use the `_to_T2WI`
+# suffix; zhongyiyuan uses `_to_T2W`; bare names are kept as a bronze fallback.
+MODALITY_STEMS = {
+    "t2w": ["T2WI", "T2W"],
+    "adc": ["ADC_to_T2WI", "ADC_to_T2W", "ADC"],
+    "dwi": ["DWI_to_T2WI", "DWI_to_T2W", "DWI"],
+    "dce": ["DCE_to_T2WI", "DCE_to_T2W", "DCE"],
+}
+
+
+def _resolve_stem(exam_dir: Path, candidates):
+    """First existing `<candidate>.nii(.gz)` in `exam_dir`, trying stems in order."""
+    for stem in candidates:
+        for ext in (".nii.gz", ".nii"):
+            p = exam_dir / f"{stem}{ext}"
+            if p.exists():
+                return p
+    return None
 
 
 def _find_mask(exam_dir: Path):
+    """In-dir mask fallback (bronze / co-located masks)."""
     for p in exam_dir.glob("*mask*.nii*"):
         return p
     return None
 
 
+def _silver_mask(mask_root: Path, hosp: str, subject: str):
+    """Locate the prostate mask in the parallel Prostate_masks tree."""
+    d = mask_root / hosp / subject
+    if not d.is_dir():
+        return None
+    for name in ("prostate_mask.nii.gz", "prostate_mask.nii"):
+        p = d / name
+        if p.exists():
+            return p
+    # any *mask* file, but never the zonal segmentation
+    for p in sorted(d.glob("*mask*.nii*")):
+        if "zone" not in p.name.lower():
+            return p
+    return None
+
+
 def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
     cond = np.stack([arrays[k] for k in INPUT_KEYS], axis=0)
-    target = arrays["dce"][None]
+    target = arrays[DCE_KEY][None]
     if "mask" in arrays:
         mask = arrays["mask"][None]
     else:
@@ -60,34 +115,39 @@ def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Canonical (5 hospitals, fixed names, single-phase DCE)
+# Canonical (single-phase DCE centers, silver layout)
 # ---------------------------------------------------------------------------
 class CanonicalDCEDataset(Dataset):
-    FILENAMES = {"t2w": "T2WI", "dwi": "DWI", "adc": "ADC", "dce": "DCE"}
+    MODS = ("t2w", "dwi", "adc", "dce")
 
     def __init__(self, root, hospitals=None, cfg: PreprocessConfig | None = None,
-                 exam_glob="exam_*", require_all=True, harmonizer=None):
+                 harmonizer=None, image_subdir=IMAGE_SUBDIR, mask_subdir=MASK_SUBDIR,
+                 subject_glob="*", require_all=True):
         self.root = Path(root)
         self.cfg = cfg or PreprocessConfig()
         self.harmonizer = harmonizer
         self.hospitals = hospitals or CANONICAL_HOSPITALS
+        self.img_root = self.root / image_subdir
+        self.mask_root = self.root / mask_subdir
         self.samples = []
         for hosp in self.hospitals:
-            for exam in sorted((self.root / hosp).glob(exam_glob)):
-                if not exam.is_dir():
+            hosp_dir = self.img_root / hosp
+            found = skipped = 0
+            for subj in sorted(hosp_dir.glob(subject_glob)):
+                if not subj.is_dir():
                     continue
-                paths = {k: self._resolve(exam, name) for k, name in self.FILENAMES.items()}
+                paths = {k: _resolve_stem(subj, MODALITY_STEMS[k]) for k in self.MODS}
                 if require_all and any(v is None for v in paths.values()):
+                    skipped += 1
                     continue
-                self.samples.append((f"{hosp}/{exam.name}", paths, _find_mask(exam)))
-
-    @staticmethod
-    def _resolve(exam: Path, stem: str):
-        for ext in (".nii.gz", ".nii"):
-            p = exam / f"{stem}{ext}"
-            if p.exists():
-                return p
-        return None
+                mask = _silver_mask(self.mask_root, hosp, subj.name) or _find_mask(subj)
+                self.samples.append((f"{hosp}/{subj.name}", paths, mask))
+                found += 1
+            if found == 0:
+                log.warning(f"[canonical] {hosp}: 0 usable subjects under {hosp_dir} "
+                            f"({skipped} skipped for missing modalities)")
+            else:
+                log.info(f"[canonical] {hosp}: {found} subjects ({skipped} skipped)")
 
     def __len__(self):
         return len(self.samples)
@@ -111,72 +171,77 @@ class CanonicalDCEDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Descriptor-glob (zhongyiyuan, multi-phase, peak selection)
+# Descriptor (zhongyiyuan, multi-phase, peak selection)
 # ---------------------------------------------------------------------------
 class DescriptorDCEDataset(Dataset):
-    """Match modality files by descriptor substrings (case-insensitive regex).
+    """Multi-phase DCE: pick the peak post-contrast dynamic phase per subject.
 
-    Defaults follow the slide examples; override `patterns` if names differ.
+    Inputs (T2w/ADC/DWI) resolve by the shared MODALITY_STEMS; the dynamic phases
+    are globbed by `phase_glob` (default the silver `DCE_ph*_to_T2W*` series) and
+    ordered by phase number. The pre-contrast baseline (`DCE_pre`) is excluded.
     """
 
-    DEFAULT_PATTERNS = {
-        "t2w": r"t2",
-        "dwi": r"dwi",
-        "adc": r"adc",
-        "phase": r"(dyn|lava-flex\+c|ph\d+dyn)",  # dynamic DCE phases
-    }
-
     def __init__(self, root, hospitals=None, cfg: PreprocessConfig | None = None,
-                 exam_glob="exam_*", patterns=None, harmonizer=None):
+                 harmonizer=None, image_subdir=IMAGE_SUBDIR, mask_subdir=MASK_SUBDIR,
+                 subject_glob="*", phase_glob="DCE_ph*_to_T2W*.nii*", phase_select="early"):
         self.root = Path(root)
         self.cfg = cfg or PreprocessConfig()
         self.harmonizer = harmonizer
         self.hospitals = hospitals or DESCRIPTOR_HOSPITALS
-        self.pat = {k: re.compile(v, re.IGNORECASE)
-                    for k, v in (patterns or self.DEFAULT_PATTERNS).items()}
+        self.img_root = self.root / image_subdir
+        self.mask_root = self.root / mask_subdir
+        self.phase_glob = phase_glob
+        # which dynamic phase becomes the target: "peak" (mask-mean argmax),
+        # "early" (first post-contrast = ph1), or an int index into the sorted phases.
+        self.phase_select = phase_select
         self.samples = []
         for hosp in self.hospitals:
-            for exam in sorted((self.root / hosp).glob(exam_glob)):
-                if exam.is_dir():
-                    self.samples.append((f"{hosp}/{exam.name}", exam))
-
-    def _match(self, files, key):
-        # exclude mask files; pick first match for single-volume modalities
-        hits = [f for f in files if self.pat[key].search(f.name) and "mask" not in f.name.lower()]
-        return hits
+            hosp_dir = self.img_root / hosp
+            found = 0
+            for subj in sorted(hosp_dir.glob(subject_glob)):
+                if subj.is_dir():
+                    self.samples.append((f"{hosp}/{subj.name}", subj, hosp))
+                    found += 1
+            log.info(f"[descriptor] {hosp}: {found} subjects under {hosp_dir}")
 
     @staticmethod
     def _phase_sort_key(path: Path):
         m = re.search(r"ph(\d+)", path.name, re.IGNORECASE)
-        return int(m.group(1)) if m else -1  # +C water phase (no Ph#) sorts first
+        return int(m.group(1)) if m else -1
 
     def __len__(self):
         return len(self.samples)
 
     def _load_images(self, i):
-        case_id, exam = self.samples[i]
-        files = sorted(exam.glob("*.nii*"))
+        case_id, subj, hosp = self.samples[i]
 
-        inputs = {}
-        for key in ("t2w", "dwi", "adc"):
-            hits = self._match(files, key)
-            if not hits:
-                raise FileNotFoundError(f"{case_id}: no file matched '{key}' ({self.pat[key].pattern})")
-            inputs[key] = hits[0]
+        inputs = {k: _resolve_stem(subj, MODALITY_STEMS[k]) for k in INPUT_KEYS}
+        missing = [k for k, v in inputs.items() if v is None]
+        if missing:
+            raise FileNotFoundError(f"{case_id}: missing input modalities {missing} in {subj}")
 
-        phase_files = sorted(self._match(files, "phase"), key=self._phase_sort_key)
+        phase_files = sorted(subj.glob(self.phase_glob), key=self._phase_sort_key)
         if not phase_files:
-            raise FileNotFoundError(f"{case_id}: no dynamic DCE phase files matched")
+            raise FileNotFoundError(f"{case_id}: no dynamic DCE phases matched "
+                                    f"'{self.phase_glob}' in {subj}")
 
-        mask_path = _find_mask(exam)
+        mask_path = _silver_mask(self.mask_root, hosp, subj.name) or _find_mask(subj)
         mask_img = load_sitk(mask_path) if mask_path else None
 
         phase_imgs = [load_sitk(p) for p in phase_files]
-        peak = peak_phase_index(phase_imgs, mask_img)
+        idx = self._select_phase(phase_imgs, mask_img)
 
         images = {k: load_sitk(v) for k, v in inputs.items()}
-        images["dce"] = phase_imgs[peak]
+        images[DCE_KEY] = phase_imgs[idx]
         return case_id, images, mask_img
+
+    def _select_phase(self, phase_imgs, mask_img) -> int:
+        sel = self.phase_select
+        if sel == "peak":
+            return peak_phase_index(phase_imgs, mask_img)
+        if sel == "early":
+            return 0  # phases are sorted ascending, so 0 == ph1 (first post-contrast)
+        return max(0, min(int(sel), len(phase_imgs) - 1))
 
     def __getitem__(self, i):
         case_id, images, mask_img = self._load_images(i)
@@ -193,28 +258,43 @@ class DescriptorDCEDataset(Dataset):
 # ---------------------------------------------------------------------------
 # Tier-1 convenience builder
 # ---------------------------------------------------------------------------
+class _EmptyDataset(Dataset):
+    def __len__(self):
+        return 0
+
+    def __getitem__(self, i):
+        raise IndexError("empty dataset")
+
+
 def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="train",
-                         harmonizer=None):
-    """Return a ConcatDataset over the canonical + descriptor cohorts.
+                         harmonizer=None, test_hospitals=None,
+                         image_subdir=IMAGE_SUBDIR, mask_subdir=MASK_SUBDIR,
+                         dce_phase="early"):
+    """ConcatDataset over the canonical + descriptor cohorts for a given split.
 
-    split: "train"  -> all hospitals except the held-out test centers
-           "test"   -> only the held-out test centers (taizhou, zhangjiagang)
-           "all"    -> everything
+    split: "train" -> all silver hospitals except the held-out test centers
+           "test"  -> only the held-out test centers
+           "all"   -> everything
+
+    `test_hospitals` defaults to TIER1_TEST_HOSPITALS (jiulong). Returns an empty
+    dataset (len 0) if a split has no hospitals, so callers can guard on len().
     """
-    from torch.utils.data import ConcatDataset
-
     cfg = cfg or PreprocessConfig()
+    test_hospitals = list(TIER1_TEST_HOSPITALS if test_hospitals is None else test_hospitals)
+
     if split == "train":
-        canon = [h for h in CANONICAL_HOSPITALS if h not in TIER1_TEST_HOSPITALS]
-        desc = DESCRIPTOR_HOSPITALS
+        canon = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
+        desc = [h for h in DESCRIPTOR_HOSPITALS if h not in test_hospitals]
     elif split == "test":
-        canon, desc = TIER1_TEST_HOSPITALS, []
+        canon = [h for h in CANONICAL_HOSPITALS if h in test_hospitals]
+        desc = [h for h in DESCRIPTOR_HOSPITALS if h in test_hospitals]
     else:
         canon, desc = CANONICAL_HOSPITALS, DESCRIPTOR_HOSPITALS
 
+    kw = dict(image_subdir=image_subdir, mask_subdir=mask_subdir, harmonizer=harmonizer)
     parts = []
     if canon:
-        parts.append(CanonicalDCEDataset(bao_root, canon, cfg, harmonizer=harmonizer))
+        parts.append(CanonicalDCEDataset(bao_root, canon, cfg, **kw))
     if desc:
-        parts.append(DescriptorDCEDataset(bao_root, desc, cfg, harmonizer=harmonizer))
-    return ConcatDataset(parts)
+        parts.append(DescriptorDCEDataset(bao_root, desc, cfg, phase_select=dce_phase, **kw))
+    return ConcatDataset(parts) if parts else _EmptyDataset()

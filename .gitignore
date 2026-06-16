@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Run outputs / artifacts
+runs/
+logs/
+*.pt
+*.pth
+
+# Environments
+venv/
+.venv/
+
+# OS / editor cruft
+.DS_Store

@@ -25,18 +25,36 @@ python -m tier1_static.main --model ldm_flow --data-root /path/to/Bao_DCE \
 
 Cluster runs use SLURM: `sbatch tier1_static/scripts/train.slurm`, overriding via env vars (`MODEL=gan EPOCHS=200 DATA_ROOT=... sbatch ...`). The slurm script expects a `venv/` at the project root.
 
-There is **no test suite, linter, or build step** — validation is done by running `main.py` with `--limit` for a quick end-to-end smoke test.
+There is **no test suite, linter, or build step** — validation is done by running `main.py` with `--limit` for a quick end-to-end smoke test. A CPU smoke run that exercises data → harmonizer fit → train → ROI loss/metrics → eval (uses the bundled `Bao_intern_package/processed_registered_samples`, itself a silver tree):
+
+```bash
+python -m tier1_static.main --model gan \
+    --data-root Bao_intern_package/processed_registered_samples \
+    --output-dir runs/smoke --limit 6 --epochs 1 --spatial-size 16 96 96 \
+    --base-ch 8 --batch-size 2 --num-workers 0 --no-fid --perceptual 0 --device cpu
+```
+
+Expect `train cases: 6  test cases: 1` (jiulong held out) and ROI metrics (`mae_roi/psnr_roi/ssim_roi`) in the final line — their presence confirms masks resolved from the `Prostate_masks/` tree.
 
 ## Architecture
 
 The pipeline is a strict chain: **data → harmonization → model → train → eval**, orchestrated entirely by `main.py`. Understanding it requires reading across the `data/`, `models/`, `training/`, and `loss/` packages because the contracts between them are implicit.
 
 ### Data layer (`data/`)
-The Bao multicenter cohort uses **two different on-disk layouts**, so there are two `Dataset` classes (`dataset.py`):
-- `CanonicalDCEDataset` — 5 hospitals with fixed names (`changshu, fuyiyuan, jiulong, taizhou, zhangjiagang`), files `exam_XXXX/{T2WI,ADC,DWI,DCE}.nii.gz`. DCE is single-phase → used directly as target.
-- `DescriptorDCEDataset` — `zhongyiyuan` (GE LAVA-Flex), multi-phase DCE matched by **descriptor regex**. The target is the **peak phase**, chosen by argmax of mean intensity inside the prostate mask (`peak_phase_index` in `preprocessing.py`).
+The loaders target the Bao_DCE **silver** layer on CHPC (`DATA_ROOT=.../Bao_DCE`), which splits images and masks into two parallel trees keyed by `<center>/<subject>`:
 
-`build_tier1_datasets(...)` merges both into a `ConcatDataset` and applies the **train/test split by hospital** — `TIER1_TEST_HOSPITALS = [taizhou, zhangjiagang]` are held out. Changing the split means editing those module-level constants.
+    <root>/Image_volumes/<center>/<subject>/   registered volumes (T2 reference space)
+    <root>/Prostate_masks/<center>/<subject>/  prostate_mask.nii.gz (+ prostate_zones)
+
+(Sub-tree names are overridable via `--image-subdir`/`--mask-subdir`.) The `<root>/00_raw_from_bao/exams/<center>/exam_*` **bronze** layer is immutable, unregistered, has 4D multi-phase `DCE.nii.gz`, and carries **no masks** — the loaders do *not* read it.
+
+Only **four** centers exist in silver: `changshu, fuyiyuan, jiulong` (single-phase) + `zhongyiyuan` (multi-phase). `taizhou`/`zhangjiagang` are bronze-only, so the lead's intended held-out test (taizhou+zhangjiagang) is **not** runnable against silver. Two `Dataset` classes (`dataset.py`):
+- `CanonicalDCEDataset` — single-phase centers; files resolve via `MODALITY_STEMS` (`T2WI`, `ADC_to_T2WI`, `DWI_to_T2WI`, `DCE_to_T2WI`, with `_to_T2W`/bare fallbacks). DCE is single-phase → used directly as target.
+- `DescriptorDCEDataset` — `zhongyiyuan` (GE LAVA-Flex), multi-phase DCE (`DCE_pre` + `ph1..4`). Inputs resolve via `MODALITY_STEMS` (`T2W`, `ADC_to_T2W`, …); dynamic phases are globbed by `phase_glob` (`DCE_ph*_to_T2W*`, pre-contrast excluded). The target phase is set by `--dce-phase`: `early` (default, ph1), `peak` (mask-mean argmax via `peak_phase_index`), or an int index.
+
+  **Target-phase consistency:** the three single-phase centers provide one *early-phase* DCE (≈ph1/ph2) as their target, so the default is `--dce-phase early` — it makes zhongyiyuan's target ph1, matching the single-phase centers. `--dce-phase peak` instead targets enhancement-peak (a phase mismatch across the pool, kept available for the early-vs-peak comparison). The canonical Tier-1 phase remains an open project decision.
+
+`build_tier1_datasets(...)` merges both into a `ConcatDataset` and applies the **train/test split by hospital** — `TIER1_TEST_HOSPITALS = [jiulong]` is held out by default. Override at runtime with `--test-hospitals` (threaded through `build_data`); the module-level constant is the default. A split with no hospitals returns a 0-length `_EmptyDataset` so callers guard on `len()`.
 
 Every sample is a dict: `{"cond": (3,D,H,W), "target": (1,D,H,W), "mask": (1,D,H,W), "id": str}`. Mask is zeros if unavailable.
 
@@ -74,7 +92,7 @@ Both LDMs share `train_ldm(...)`, parameterized by a `flow` flag. The flow is: (
 ### Evaluation (`eval.py`, `metrics.py`)
 `evaluate` runs `gen` over the test loader, reports per-volume **SSIM / PSNR / MAE** plus their ROI counterparts **MAE_roi / PSNR_roi / SSIM_roi** (computed only when a non-empty mask is present), optionally computes **FID** over 2D axial slices via `torch_fidelity` (Inception-v3), and saves the first case as NIfTI + a PNG montage. The global-vs-ROI gap is the intended signal: global metrics are ~99% background, so a large gap means the prostate is being reconstructed poorly despite good-looking global numbers. `aggregate` averages each key only over the batches that report it, so mixed mask availability is fine. FID/NIfTI/montage saves are wrapped in soft try/except — missing optional deps (`torch_fidelity`, `SimpleITK`, `matplotlib`) degrade gracefully.
 
-**Masks are the prerequisite for both ROI loss and ROI metrics.** The dataset returns a zeros mask when `_find_mask` can't locate a `*mask*.nii*` file in the exam dir, in which case `--roi-weight` is a silent no-op and the ROI metrics are skipped. The reliable prostate masks must therefore live alongside each exam's modality files (the `Bao_intern_package` samples keep them in a separate `Prostate_masks/` tree, which the loader does *not* read as-is).
+**Masks are the prerequisite for both ROI loss and ROI metrics.** The loaders read `prostate_mask.nii.gz` from the parallel `Prostate_masks/<center>/<subject>/` tree (helper `_silver_mask`, with a `_find_mask` in-dir fallback). All four silver centers have masks, so `--roi-weight` fires and ROI metrics are reported. If a mask can't be found the dataset returns a zeros mask, in which case `--roi-weight` is a silent no-op and the ROI metrics are skipped for that case (`aggregate` averages each key only over cases that report it).
 
 ## Conventions and gotchas
 
