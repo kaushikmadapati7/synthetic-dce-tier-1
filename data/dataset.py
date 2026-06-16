@@ -197,12 +197,25 @@ class DescriptorDCEDataset(Dataset):
         self.samples = []
         for hosp in self.hospitals:
             hosp_dir = self.img_root / hosp
-            found = 0
+            found = skipped = 0
+            skipped_ids = []
             for subj in sorted(hosp_dir.glob(subject_glob)):
-                if subj.is_dir():
+                if not subj.is_dir():
+                    continue
+                # only keep subjects that have all inputs AND >=1 dynamic phase, so a
+                # malformed subject is dropped here (with a count) rather than crashing
+                # a DataLoader worker mid-epoch.
+                inputs_ok = all(_resolve_stem(subj, MODALITY_STEMS[k]) for k in INPUT_KEYS)
+                has_phase = any(subj.glob(self.phase_glob))
+                if inputs_ok and has_phase:
                     self.samples.append((f"{hosp}/{subj.name}", subj, hosp))
                     found += 1
-            log.info(f"[descriptor] {hosp}: {found} subjects under {hosp_dir}")
+                else:
+                    skipped += 1
+                    if len(skipped_ids) < 8:
+                        skipped_ids.append(subj.name)
+            note = f", e.g. {skipped_ids}" if skipped_ids else ""
+            log.info(f"[descriptor] {hosp}: {found} subjects ({skipped} skipped{note}) under {hosp_dir}")
 
     @staticmethod
     def _phase_sort_key(path: Path):
