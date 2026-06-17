@@ -102,12 +102,14 @@ class AutoencoderKL3D(nn.Module):
         self.decoder = Decoder3D(out_channels, base_ch, ch_mults, latent_channels,
                                  num_res_blocks, attn_resolutions)
         self.scaling_factor = scaling_factor
+        self.latent_shift = 0.0  # set post-training like scaling_factor; 0.0 = no centering
 
     def encode(self, x) -> DiagonalGaussian:
         return DiagonalGaussian(self.encoder(x))
 
     def decode(self, z):
-        return self.decoder(z / self.scaling_factor)
+        # invert the LDM's (z - shift) * scaling normalization back to raw latents
+        return self.decoder(z / self.scaling_factor + self.latent_shift)
 
     def forward(self, x):
         posterior = self.encode(x)

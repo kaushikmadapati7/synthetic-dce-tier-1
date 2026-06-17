@@ -220,6 +220,11 @@ def parse_args():
     p.add_argument("--kl-weight", type=float, default=1e-6)
     p.add_argument("--timesteps", type=int, default=1000)
     p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--beta-schedule", choices=["cosine", "linear"], default="linear",
+                   help="DDPM noise schedule; linear avoids cosine's explosive clamped-tail betas")
+    p.add_argument("--latent-center", action="store_true", default=False,
+                   help="center the VAE latent (zero-mean) before diffusion so a DDPM's "
+                        "N(0,1) prior matches; recommended for ldm_ddpm")
     p.add_argument("--vae-ckpt", default="")
     # loss
     p.add_argument("--l1", type=float, default=1.0)

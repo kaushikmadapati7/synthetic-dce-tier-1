@@ -27,13 +27,16 @@ def _build_ldm(args, device, flow: bool):
     if flow:
         ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs).to(device)
     else:
-        ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps, unet_kwargs=unet_kwargs).to(device)
+        ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps,
+                       beta_schedule=getattr(args, "beta_schedule", "linear"),
+                       unet_kwargs=unet_kwargs).to(device)
     return vae, ldm
 
 
-def _set_scaling_factor(vae, train_loader, device):
-    """Latent std -> scaling_factor (~1 std, standard LDM practice). Not stored in
-    the checkpoint, so it is (re)computed here for both training and eval-only."""
+def _set_scaling_factor(vae, train_loader, device, center=False):
+    """Latent std -> scaling_factor (~1 std) and, if ``center``, latent mean ->
+    latent_shift (zero-mean latents, so a DDPM's N(0,1) prior matches). Neither is
+    stored in the checkpoint, so both are (re)computed for training and eval-only."""
     vae.eval()
     with torch.no_grad():
         zs = []
@@ -41,9 +44,13 @@ def _set_scaling_factor(vae, train_loader, device):
             zs.append(vae.encode(batch["target"].to(device)).sample())
             if i >= 4:
                 break
-        std = torch.cat(zs).std().item()
+        z = torch.cat(zs)
+        std = z.std().item()
+        mean = z.mean().item() if center else 0.0
     vae.scaling_factor = 1.0 / (std + 1e-8)
-    log.info(f"latent std={std:.4f} -> scaling_factor={vae.scaling_factor:.4f}")
+    vae.latent_shift = mean
+    log.info(f"latent std={std:.4f} mean={mean:.4f} -> scaling_factor={vae.scaling_factor:.4f} "
+             f"latent_shift={vae.latent_shift:.4f}")
 
 
 def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
@@ -64,7 +71,8 @@ def load_ldm(args, train_loader, test_loader, device, flow: bool):
     ldm.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
     ldm.eval()
     log.info(f"loaded {name} checkpoint {ckpt}")
-    _set_scaling_factor(vae, train_loader, device)  # not in the state_dict; recompute
+    # scaling_factor + latent_shift aren't in the state_dict; recompute (same flags as training)
+    _set_scaling_factor(vae, train_loader, device, center=getattr(args, "latent_center", False))
     with torch.no_grad():
         z0 = ldm.encode(next(iter(train_loader))["target"].to(device))
     lat_spatial = tuple(z0.shape[2:])
@@ -93,8 +101,8 @@ def train_vae(args, train_loader, criterion, device):
             log_epoch(epoch, args.vae_epochs, agg, len(train_loader), time.time() - t0, "VAE")
             save_ckpt(args, "vae", vae, epoch, args.vae_epochs, state_dict=True)
 
-    # scaling factor: normalize latent std to ~1 (standard LDM practice)
-    _set_scaling_factor(vae, train_loader, device)
+    # scaling factor (+ optional centering) for the latent diffusion stage
+    _set_scaling_factor(vae, train_loader, device, center=getattr(args, "latent_center", False))
     for p in vae.parameters():
         p.requires_grad_(False)
     return vae
@@ -115,7 +123,9 @@ def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
     if flow:
         ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs).to(device)
     else:
-        ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps, unet_kwargs=unet_kwargs).to(device)
+        ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps,
+                       beta_schedule=getattr(args, "beta_schedule", "linear"),
+                       unet_kwargs=unet_kwargs).to(device)
     log.info(f"UNet params: {sum(p.numel() for p in ldm.unet.parameters())/1e6:.1f}M")
 
     opt = torch.optim.Adam(ldm.unet.parameters(), lr=args.lr)

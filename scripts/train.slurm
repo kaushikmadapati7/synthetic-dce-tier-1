@@ -53,6 +53,8 @@ N_UPSAMPLES=${N_UPSAMPLES:-4}                  # GAN up/down depth
 KL_WEIGHT=${KL_WEIGHT:-1e-6}                   # VAE
 TIMESTEPS=${TIMESTEPS:-1000}                   # diffusion
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
+BETA_SCHEDULE=${BETA_SCHEDULE:-linear}          # ddpm noise schedule: linear | cosine
+LATENT_CENTER=${LATENT_CENTER:-0}               # 1 = zero-center latents (recommended for ddpm)
 VAE_CKPT=${VAE_CKPT:-}                          # reuse a trained VAE (skip stage 1)
 
 # ---- loss ---------------------------------------------------------------------
@@ -117,6 +119,7 @@ ARGS=(
   --kl-weight "${KL_WEIGHT}"
   --timesteps "${TIMESTEPS}"
   --sample-steps "${SAMPLE_STEPS}"
+  --beta-schedule "${BETA_SCHEDULE}"
   --l1 "${L1}"
   --ssim "${SSIM}"
   --perceptual "${PERCEPTUAL}"
@@ -130,6 +133,7 @@ ARGS=(
 if [ "${HARMONIZE}" != "1" ]; then ARGS+=(--no-harmonize); fi
 if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
 if [ "${EVAL_ONLY}" = "1" ]; then ARGS+=(--eval-only); fi
+if [ "${LATENT_CENTER}" = "1" ]; then ARGS+=(--latent-center); fi
 if [ -n "${VAE_CKPT}" ]; then ARGS+=(--vae-ckpt "${VAE_CKPT}"); fi
 if [ -n "${EXTRA_ARGS}" ]; then ARGS+=(${EXTRA_ARGS}); fi
 

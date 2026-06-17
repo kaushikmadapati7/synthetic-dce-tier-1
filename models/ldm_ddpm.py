@@ -58,7 +58,7 @@ class LDM_DDPM(nn.Module):
     @torch.no_grad()
     def encode(self, x):
         z = self.autoencoder.encode(x).sample()
-        return z * self.autoencoder.scaling_factor
+        return (z - self.autoencoder.latent_shift) * self.autoencoder.scaling_factor
 
     @torch.no_grad()
     def decode(self, z):
@@ -102,7 +102,7 @@ class LDM_DDPM(nn.Module):
 
     @torch.no_grad()
     def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None,
-                    decode=True, x0_clamp=5.0):
+                    decode=True, x0_clamp=0.0):
         seq = torch.linspace(self.timesteps - 1, 0, steps, device=device).long()
         zt = torch.randn(shape, device=device)
         for i in range(steps):

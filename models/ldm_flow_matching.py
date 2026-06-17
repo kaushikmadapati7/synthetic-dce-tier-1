@@ -34,7 +34,7 @@ class LDM_FlowMatching(nn.Module):
     @torch.no_grad()
     def encode(self, x):
         z = self.autoencoder.encode(x).sample()
-        return z * self.autoencoder.scaling_factor
+        return (z - self.autoencoder.latent_shift) * self.autoencoder.scaling_factor
 
     @torch.no_grad()
     def decode(self, z):

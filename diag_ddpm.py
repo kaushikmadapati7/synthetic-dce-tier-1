@@ -33,6 +33,8 @@ def stats(name, t):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "runs/cmp_ldm_ddpm"
     cfg = json.loads(Path(out, "config.json").read_text())
+    cfg.setdefault("beta_schedule", "cosine")   # configs predating these flags
+    cfg.setdefault("latent_center", False)
     cfg.update(eval_only=True, limit=8, num_workers=2, compute_fid=False)
     args = SimpleNamespace(**cfg)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
