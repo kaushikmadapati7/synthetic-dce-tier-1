@@ -101,7 +101,8 @@ class LDM_DDPM(nn.Module):
         return self.decode(zt) if decode and self.autoencoder is not None else zt
 
     @torch.no_grad()
-    def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None, decode=True):
+    def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None,
+                    decode=True, x0_clamp=5.0):
         seq = torch.linspace(self.timesteps - 1, 0, steps, device=device).long()
         zt = torch.randn(shape, device=device)
         for i in range(steps):
@@ -109,6 +110,12 @@ class LDM_DDPM(nn.Module):
             eps = self.unet(zt, t.float(), cond=cond, labels=labels)
             acp_t = _extract(self.alphas_cumprod, t, zt.shape)
             z0 = (zt - torch.sqrt(1 - acp_t) * eps) / torch.sqrt(acp_t)
+            # Bound the x0 estimate: at high-noise steps the cosine schedule's
+            # alphas_cumprod -> 0, so 1/sqrt(acp_t) blows up any eps error into a
+            # huge z0 that corrupts the trajectory (saturated/garbage decode). The
+            # scaled latents are ~unit-std, so +/-5 sigma never clips valid values.
+            if x0_clamp:
+                z0 = z0.clamp(-x0_clamp, x0_clamp)
             if i < steps - 1:
                 t_next = torch.full((shape[0],), seq[i + 1], device=device, dtype=torch.long)
                 acp_n = _extract(self.alphas_cumprod, t_next, zt.shape)
