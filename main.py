@@ -31,7 +31,7 @@ from .data import (PreprocessConfig, Harmonizer, build_tier1_datasets,
                    CanonicalDCEDataset, fit_harmonizer_from_dataset,
                    CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
-from .training import TRAINERS
+from .training import TRAINERS, LOADERS
 from .eval import evaluate
 
 log = logging.getLogger("tier1")
@@ -111,16 +111,21 @@ def build_data(args):
 
     harmonizer = None
     if args.harmonize:
-        harmonizer = Harmonizer()
-        fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
-        fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg, **layout)
-        if len(fit_ds) == 0:
-            log.warning("no canonical exams found to fit harmonizer; disabling harmonization")
-            harmonizer = None
+        saved = out / "harmonizer.json"
+        if args.eval_only and saved.exists():
+            harmonizer = Harmonizer.load(saved)
+            log.info(f"eval-only: loaded harmonizer {saved} (skipping re-fit)")
         else:
-            log.info(f"fitting harmonizer (Nyul) on {min(len(fit_ds), args.harmonize_max)} cases ...")
-            fit_harmonizer_from_dataset(harmonizer, fit_ds, max_cases=args.harmonize_max)
-            harmonizer.save(out / "harmonizer.json")
+            harmonizer = Harmonizer()
+            fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
+            fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg, **layout)
+            if len(fit_ds) == 0:
+                log.warning("no canonical exams found to fit harmonizer; disabling harmonization")
+                harmonizer = None
+            else:
+                log.info(f"fitting harmonizer (Nyul) on {min(len(fit_ds), args.harmonize_max)} cases ...")
+                fit_harmonizer_from_dataset(harmonizer, fit_ds, max_cases=args.harmonize_max)
+                harmonizer.save(out / "harmonizer.json")
 
     train = build_tier1_datasets(args.data_root, cfg, "train", harmonizer,
                                  test_hospitals=test_hospitals, dce_phase=args.dce_phase, **layout)
@@ -151,17 +156,24 @@ def main():
     device = torch.device(args.device if args.device else
                           ("cuda" if torch.cuda.is_available() else "cpu"))
     resolve_medicalnet_weights(args)
-    (out / "config.json").write_text(json.dumps(vars(args), indent=2))
+    # don't clobber the training config.json when only re-evaluating
+    cfg_name = "config_eval.json" if args.eval_only else "config.json"
+    (out / cfg_name).write_text(json.dumps(vars(args), indent=2))
     log.info(f"device={device}  model={args.model}")
     log.info(f"config: {json.dumps(vars(args))}")
 
     train_loader, test_loader = build_data(args)
-    criterion = make_criterion(args, device)
 
     t0 = time.time()
-    trainer = TRAINERS[args.model]
-    _, gen = trainer(args, train_loader, test_loader, criterion, device)
-    log.info(f"training done in {(time.time() - t0) / 60:.1f} min")
+    if args.eval_only:
+        log.info(f"eval-only: loading {args.model} checkpoint from {args.output_dir}/checkpoints")
+        _, gen = LOADERS[args.model](args, train_loader, test_loader, device)
+        log.info(f"checkpoint loaded in {(time.time() - t0):.1f}s")
+    else:
+        criterion = make_criterion(args, device)
+        trainer = TRAINERS[args.model]
+        _, gen = trainer(args, train_loader, test_loader, criterion, device)
+        log.info(f"training done in {(time.time() - t0) / 60:.1f} min")
 
     metrics = evaluate(args, gen, test_loader, device)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -221,6 +233,9 @@ def parse_args():
                    help="how much more ROI voxels count in the recon loss (1.0 = off; "
                         "needs prostate masks in the data)")
     # evaluation
+    p.add_argument("--eval-only", action="store_true", default=False,
+                   help="skip training: load the model from --output-dir/checkpoints and "
+                        "just run evaluation (reuses the saved harmonizer.json)")
     p.add_argument("--compute-fid", action="store_true", default=True)
     p.add_argument("--no-fid", dest="compute_fid", action="store_false")
     p.add_argument("--fid-slices", type=int, default=8,

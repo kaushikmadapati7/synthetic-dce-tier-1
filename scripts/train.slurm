@@ -69,6 +69,7 @@ MEDICALNET_WEIGHTS=${MEDICALNET_WEIGHTS:-pretrain/resnet_${PERCEPTUAL_DEPTH}.pth
 COMPUTE_FID=${COMPUTE_FID:-1}                   # 1 = FID on, 0 = off
 FID_SLICES=${FID_SLICES:-8}
 FID_BATCH_SIZE=${FID_BATCH_SIZE:-32}
+EVAL_ONLY=${EVAL_ONLY:-0}                        # 1 = skip training, load ckpt from OUTPUT_DIR and just evaluate
 
 EXTRA_ARGS=${EXTRA_ARGS:-}                       # catch-all for anything not above
 
@@ -86,6 +87,8 @@ set -u
 
 # reduce CUDA fragmentation OOMs (3D attention allocates large transient tensors)
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# torch_fidelity downloads the Inception backbone here; keep it off the (quota'd) HOME
+export TORCH_HOME=${TORCH_HOME:-$(pwd)/.torch}
 
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} model=${MODEL} env=${CONDA_ENV}"
 echo "data_root=${DATA_ROOT}  output_dir=${OUTPUT_DIR}"
@@ -126,6 +129,7 @@ ARGS=(
 )
 if [ "${HARMONIZE}" != "1" ]; then ARGS+=(--no-harmonize); fi
 if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
+if [ "${EVAL_ONLY}" = "1" ]; then ARGS+=(--eval-only); fi
 if [ -n "${VAE_CKPT}" ]; then ARGS+=(--vae-ckpt "${VAE_CKPT}"); fi
 if [ -n "${EXTRA_ARGS}" ]; then ARGS+=(${EXTRA_ARGS}); fi
 

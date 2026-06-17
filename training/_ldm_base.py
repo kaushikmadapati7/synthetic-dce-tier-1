@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import torch
 
@@ -14,6 +15,60 @@ from ..models import AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching
 from .utils import log_epoch, save_ckpt, downsample_cond
 
 log = logging.getLogger("tier1")
+
+
+def _build_ldm(args, device, flow: bool):
+    """Construct the VAE + (flow|ddpm) LDM with the configured architecture."""
+    vae = AutoencoderKL3D(in_channels=1, out_channels=1,
+                          latent_channels=args.latent_channels, base_ch=args.base_ch,
+                          ch_mults=tuple(args.ch_mults)).to(device)
+    unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
+                       cond_channels=3, base_ch=args.base_ch, ch_mults=tuple(args.unet_ch_mults))
+    if flow:
+        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs).to(device)
+    else:
+        ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps, unet_kwargs=unet_kwargs).to(device)
+    return vae, ldm
+
+
+def _set_scaling_factor(vae, train_loader, device):
+    """Latent std -> scaling_factor (~1 std, standard LDM practice). Not stored in
+    the checkpoint, so it is (re)computed here for both training and eval-only."""
+    vae.eval()
+    with torch.no_grad():
+        zs = []
+        for i, batch in enumerate(train_loader):
+            zs.append(vae.encode(batch["target"].to(device)).sample())
+            if i >= 4:
+                break
+        std = torch.cat(zs).std().item()
+    vae.scaling_factor = 1.0 / (std + 1e-8)
+    log.info(f"latent std={std:.4f} -> scaling_factor={vae.scaling_factor:.4f}")
+
+
+def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
+    def gen(cond):
+        cond_ds = downsample_cond(cond, lat_spatial)
+        shape = (cond.size(0), args.latent_channels, *lat_spatial)
+        if flow:
+            return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds)
+        return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds)
+    return gen
+
+
+def load_ldm(args, train_loader, test_loader, device, flow: bool):
+    """Rebuild the LDM, load its checkpoint, restore scaling_factor, return gen (eval-only)."""
+    vae, ldm = _build_ldm(args, device, flow)
+    name = "ldm_flow" if flow else "ldm_ddpm"
+    ckpt = Path(args.output_dir) / "checkpoints" / f"{name}_last.pt"
+    ldm.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+    ldm.eval()
+    log.info(f"loaded {name} checkpoint {ckpt}")
+    _set_scaling_factor(vae, train_loader, device)  # not in the state_dict; recompute
+    with torch.no_grad():
+        z0 = ldm.encode(next(iter(train_loader))["target"].to(device))
+    lat_spatial = tuple(z0.shape[2:])
+    return ldm, _ldm_gen(ldm, args, lat_spatial, device, flow)
 
 
 def train_vae(args, train_loader, criterion, device):
@@ -39,16 +94,7 @@ def train_vae(args, train_loader, criterion, device):
             save_ckpt(args, "vae", vae, epoch, args.vae_epochs, state_dict=True)
 
     # scaling factor: normalize latent std to ~1 (standard LDM practice)
-    vae.eval()
-    with torch.no_grad():
-        zs = []
-        for i, batch in enumerate(train_loader):
-            zs.append(vae.encode(batch["target"].to(device)).sample())
-            if i >= 4:
-                break
-        std = torch.cat(zs).std().item()
-    vae.scaling_factor = 1.0 / (std + 1e-8)
-    log.info(f"latent std={std:.4f} -> scaling_factor={vae.scaling_factor:.4f}")
+    _set_scaling_factor(vae, train_loader, device)
     for p in vae.parameters():
         p.requires_grad_(False)
     return vae
@@ -86,11 +132,4 @@ def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
         save_ckpt(args, name, ldm, epoch, args.epochs, state_dict=True)
 
-    def gen(cond):
-        cond_ds = downsample_cond(cond, lat_spatial)
-        shape = (cond.size(0), args.latent_channels, *lat_spatial)
-        if flow:
-            return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds)
-        return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds)
-
-    return ldm, gen
+    return ldm, _ldm_gen(ldm, args, lat_spatial, device, flow)
