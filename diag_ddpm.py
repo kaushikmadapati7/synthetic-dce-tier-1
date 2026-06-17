@@ -59,19 +59,20 @@ def main():
 
         cond_ds = downsample_cond(cond, z0.shape[2:])
         shape = (cond.size(0), args.latent_channels, *z0.shape[2:])
+        lat_lo, lat_hi = z0.min().item(), z0.max().item()
+        print(f"  (true latent range ~ [{lat_lo:.2f}, {lat_hi:.2f}])\n")
 
-        zt = model.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds, decode=False)
-        stats("DDIM latent (clamp=5)", zt)
-        stats("DDIM image (clamp=5)", model.decode(zt))
-
-        zt_nc = model.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds,
-                                  decode=False, x0_clamp=0)
-        stats("DDIM latent (no clamp)", zt_nc)
-        stats("DDIM image (no clamp)", model.decode(zt_nc))
-
-        za = model.sample(shape, device, cond=cond_ds, decode=False)  # full ancestral
-        stats("ancestral latent (1000 steps)", za)
-        stats("ancestral image (1000 steps)", model.decode(za))
+        # sweep the x0 clamp; the right one should pull the decoded image toward the
+        # target's mean (~-0.95) and minimize L1-vs-target.
+        for clamp in (1.5, 2.0, 2.5, 3.0, 5.0):
+            for steps in ({50, 250} if clamp == 2.5 else {50}):
+                zt = model.ddim_sample(shape, device, steps=steps, cond=cond_ds,
+                                       decode=False, x0_clamp=clamp)
+                img = model.decode(zt)
+                l1 = (img - target).abs().mean().item()
+                print(f"  DDIM clamp={clamp:<4} steps={steps:<4} "
+                      f"latent_std={zt.std():7.3f}  img_mean={img.mean():+.3f} "
+                      f"img_std={img.std():.3f}  L1_vs_target={l1:.4f}")
 
 
 if __name__ == "__main__":
