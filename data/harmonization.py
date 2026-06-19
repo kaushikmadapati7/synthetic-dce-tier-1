@@ -120,10 +120,16 @@ def clip_quantitative(arr, max_value: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 @dataclass
 class HarmonizationConfig:
+    # DCE is the prediction TARGET and must generalize to held-out hospitals; a
+    # Nyul transform fit on the training sites clips an unseen site's DCE below
+    # i_min -> the prostate floors to -1 (verified on jiulong: 95-100% of ROI
+    # voxels pinned at -1). Per-image percentile normalization needs no fit, so
+    # it generalizes by construction. Inputs (T2w/DWI/ADC) keep their methods.
     methods: dict = field(default_factory=lambda: {
-        "t2w": "nyul", "dce": "nyul", "dwi": "zscore", "adc": "clip"})
+        "t2w": "nyul", "dce": "percentile", "dwi": "zscore", "adc": "clip"})
     adc_max_value: float = 3000.0   # 10^-6 mm^2/s
     dwi_clip_sd: float = 3.0
+    dce_percentiles: tuple = (0.5, 99.9)   # per-image DCE window (matches preprocessing.normalize)
     nyul_i_min: float = 1.0
     nyul_i_max: float = 100.0
 
@@ -164,6 +170,9 @@ class Harmonizer:
             return zscore_foreground(arr, mask, self.cfg.dwi_clip_sd)
         if meth == "clip":
             return clip_quantitative(arr, self.cfg.adc_max_value)
+        if meth == "percentile":
+            lo, hi = np.percentile(arr, self.cfg.dce_percentiles)
+            return _to_unit(arr, float(lo), float(hi))
         raise ValueError(f"unknown harmonization method '{meth}' for '{modality}'")
 
     # ---- persistence ----
