@@ -248,6 +248,17 @@ def parse_args():
     p.add_argument("--guidance-scale", type=float, default=1.0,
                    help="CFG sampling scale w: pred = uncond + w*(cond-uncond). 1.0 = no "
                         "guidance; >1 sharpens conditioning (needs a cfg-dropout-trained model)")
+    # Layer-1 missing-sequence robustness (LDM only)
+    p.add_argument("--modality-dropout", action="store_true", default=False,
+                   help="randomly drop input sequences during LDM training and append a "
+                        "per-modality availability mask (cond_channels 3->6), so one model "
+                        "handles arbitrary missing inputs. Eval subset set by --eval-modalities")
+    p.add_argument("--modality-full-prob", type=float, default=0.3,
+                   help="prob a training sample keeps all 3 sequences (else a random subset, "
+                        ">=1 kept); preserves full-modality quality while teaching robustness")
+    p.add_argument("--eval-modalities", default="111",
+                   help="which input sequences are present at eval, as T2w,DWI,ADC bits "
+                        "(111=all, 100=T2w only, 101=T2w+ADC, ...). Traces the degradation curve")
     p.add_argument("--latent-center", action="store_true", default=False,
                    help="center the VAE latent (zero-mean) before diffusion so a DDPM's "
                         "N(0,1) prior matches; recommended for ldm_ddpm")

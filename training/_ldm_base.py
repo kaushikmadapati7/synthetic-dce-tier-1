@@ -13,9 +13,15 @@ import torch
 
 from ..models import AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
-                    val_score, save_best, best_or_last_ckpt)
+                    val_score, save_best, best_or_last_ckpt, prep_cond)
 
 log = logging.getLogger("tier1")
+
+
+def _cond_channels(args):
+    """3 input sequences, doubled to 6 (image + availability mask) under Layer-1
+    modality dropout so the U-Net can tell a missing sequence from a dark voxel."""
+    return 6 if getattr(args, "modality_dropout", False) else 3
 
 
 def _build_ldm(args, device, flow: bool):
@@ -24,7 +30,8 @@ def _build_ldm(args, device, flow: bool):
                           latent_channels=args.latent_channels, base_ch=args.base_ch,
                           ch_mults=tuple(args.ch_mults)).to(device)
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
-                       cond_channels=3, base_ch=args.base_ch, ch_mults=tuple(args.unet_ch_mults))
+                       cond_channels=_cond_channels(args), base_ch=args.base_ch,
+                       ch_mults=tuple(args.unet_ch_mults))
     cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
         ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs,
@@ -59,6 +66,7 @@ def _set_scaling_factor(vae, train_loader, device, center=False):
 def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
     w = getattr(args, "guidance_scale", 1.0)
     def gen(cond):
+        cond = prep_cond(cond, args, training=False)   # Layer-1: fixed --eval-modalities subset
         cond_ds = downsample_cond(cond, lat_spatial)
         shape = (cond.size(0), args.latent_channels, *lat_spatial)
         if flow:
@@ -124,7 +132,8 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     log.info(f"latent grid: {z0.shape[1]}x{lat_spatial}")
 
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
-                       cond_channels=3, base_ch=args.base_ch, ch_mults=tuple(args.unet_ch_mults))
+                       cond_channels=_cond_channels(args), base_ch=args.base_ch,
+                       ch_mults=tuple(args.unet_ch_mults))
     name = "ldm_flow" if flow else "ldm_ddpm"
     cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
@@ -144,7 +153,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     for epoch in range(args.epochs):
         ldm.unet.train(); t0 = time.time(); agg = {}
         for batch in train_loader:
-            cond = batch["cond"].to(device)
+            cond = prep_cond(batch["cond"].to(device), args, training=True)  # Layer-1 dropout
             with torch.no_grad():
                 z0 = ldm.encode(batch["target"].to(device))
             cond_ds = downsample_cond(cond, z0.shape[2:])

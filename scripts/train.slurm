@@ -59,6 +59,9 @@ X0_CLAMP=${X0_CLAMP:-3.0}                        # ddim x0 bound (latents ~[-2.4
 BETA_SCHEDULE=${BETA_SCHEDULE:-linear}          # ddpm noise schedule: linear | cosine
 CFG_DROPOUT=${CFG_DROPOUT:-0.0}                 # classifier-free guidance: cond-dropout prob in training (0.1 to enable)
 GUIDANCE_SCALE=${GUIDANCE_SCALE:-1.0}           # CFG sampling scale (1=off; >1 sharpens; needs CFG-trained model)
+MODALITY_DROPOUT=${MODALITY_DROPOUT:-0}         # 1 = Layer-1 missing-sequence robustness (LDM cond 3->6)
+MODALITY_FULL_PROB=${MODALITY_FULL_PROB:-0.3}   # prob a training sample keeps all 3 sequences
+EVAL_MODALITIES=${EVAL_MODALITIES:-111}         # eval input subset bits T2w,DWI,ADC (111/100/101/...)
 LATENT_CENTER=${LATENT_CENTER:-0}               # 1 = zero-center latents (recommended for ddpm)
 VAE_CKPT=${VAE_CKPT:-}                          # reuse a trained VAE (skip stage 1)
 
@@ -130,6 +133,8 @@ ARGS=(
   --beta-schedule "${BETA_SCHEDULE}"
   --cfg-dropout "${CFG_DROPOUT}"
   --guidance-scale "${GUIDANCE_SCALE}"
+  --modality-full-prob "${MODALITY_FULL_PROB}"
+  --eval-modalities "${EVAL_MODALITIES}"
   --l1 "${L1}"
   --ssim "${SSIM}"
   --perceptual "${PERCEPTUAL}"
@@ -144,6 +149,7 @@ if [ "${HARMONIZE}" != "1" ]; then ARGS+=(--no-harmonize); fi
 if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
 if [ "${EVAL_ONLY}" = "1" ]; then ARGS+=(--eval-only); fi
 if [ "${LATENT_CENTER}" = "1" ]; then ARGS+=(--latent-center); fi
+if [ "${MODALITY_DROPOUT}" = "1" ]; then ARGS+=(--modality-dropout); fi
 if [ -n "${VAE_CKPT}" ]; then ARGS+=(--vae-ckpt "${VAE_CKPT}"); fi
 if [ -n "${EXTRA_ARGS}" ]; then ARGS+=(${EXTRA_ARGS}); fi
 

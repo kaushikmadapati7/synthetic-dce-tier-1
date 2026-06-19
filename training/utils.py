@@ -71,5 +71,61 @@ def best_or_last_ckpt(output_dir, name):
     return best if best.exists() else d / f"{name}_last.pt"
 
 
+# ---------------------------------------------------------------------------
+# Modality dropout (Layer 1: missing-sequence robustness)
+# ---------------------------------------------------------------------------
+# The conditioning is a fixed (B, 3, ...) stack [T2w, DWI, ADC]. To make one model
+# robust to missing sequences we (a) randomly drop a subset of those channels each
+# training step and (b) append a per-modality availability mask so the network can
+# distinguish "missing" from "dark voxel" -> cond_channels 3 -> 6. Sampling/eval
+# uses a *fixed* availability set (--eval-modalities) so we can trace the full
+# degradation curve (111 -> 101 -> 100 ...) from one trained model.
+
+def sample_modality_keep(batch_size, n_mod=3, full_prob=0.3, device=None):
+    """Random per-sample availability mask for training. With prob ``full_prob``
+    keep all sequences (preserves full-modality quality); otherwise drop a random
+    subset but always keep >=1 (an all-empty condition is meaningless here)."""
+    keep = torch.rand(batch_size, n_mod, device=device) > 0.5
+    keep[torch.rand(batch_size, device=device) < full_prob] = True
+    empty = ~keep.any(dim=1)
+    if empty.any():
+        rows = empty.nonzero(as_tuple=True)[0]
+        keep[rows, torch.randint(0, n_mod, (rows.numel(),), device=device)] = True
+    return keep
+
+
+def parse_modality_keep(spec, batch_size, n_mod=3, device=None):
+    """Fixed availability mask from a bit string like '111'/'101'/'100' (T2w,DWI,ADC)."""
+    bits = [c == "1" for c in str(spec)]
+    bits = (bits + [True] * n_mod)[:n_mod]
+    keep = torch.tensor(bits, device=device, dtype=torch.bool)
+    return keep.unsqueeze(0).expand(batch_size, -1)
+
+
+def apply_modality_availability(cond, keep):
+    """``cond`` (B,C,...) + ``keep`` (B,C bool) -> (B,2C,...): dropped channels
+    zeroed, concatenated with C availability-mask channels (1 present / 0 missing).
+    The mask is spatially uniform, so a later trilinear downsample to the latent
+    grid preserves it exactly."""
+    b, c = cond.shape[:2]
+    k = keep.view(b, c, *([1] * (cond.dim() - 2))).to(cond.dtype)
+    return torch.cat([cond * k, k.expand_as(cond)], dim=1)
+
+
+def prep_cond(cond, args, training):
+    """Apply Layer-1 modality dropout/availability to ``cond`` when enabled; a
+    no-op (returns ``cond`` unchanged) otherwise. Train: random keep-set. Eval:
+    the fixed --eval-modalities subset."""
+    if not getattr(args, "modality_dropout", False):
+        return cond
+    if training:
+        keep = sample_modality_keep(cond.size(0), device=cond.device,
+                                    full_prob=getattr(args, "modality_full_prob", 0.3))
+    else:
+        keep = parse_modality_keep(getattr(args, "eval_modalities", "111"),
+                                   cond.size(0), device=cond.device)
+    return apply_modality_availability(cond, keep)
+
+
 def downsample_cond(cond: torch.Tensor, size) -> torch.Tensor:
     return F.interpolate(cond, size=tuple(size), mode="trilinear", align_corners=False)
