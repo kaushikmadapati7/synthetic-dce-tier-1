@@ -35,7 +35,7 @@ def evaluate(args, gen, test_loader, device):
                 all_preds.append(pred[i].cpu())
                 all_targets.append(target[i].cpu())
         if first is None:
-            first = (cond.cpu(), target.cpu(), pred.cpu(), batch["id"][0])
+            first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), batch["id"][0])
     metrics = aggregate(per_batch)
     if compute_fid_flag and all_preds:
         fid = compute_fid(all_preds, all_targets, device,
@@ -49,26 +49,67 @@ def evaluate(args, gen, test_loader, device):
     return metrics
 
 
-def save_samples(out_dir: Path, cond, target, pred, case_id):
+def save_samples(out_dir: Path, cond, target, pred, mask, case_id):
+    """Qualitative dump for one case. Unlike a naive mid-slice montage, this picks
+    the slice with the most prostate-mask voxels, windows the DCE consistently
+    (shared robust percentile range, so a single hot vessel voxel can't crush the
+    contrast to black), draws a pred-target error map + mask outline, and logs the
+    target's ROI intensity stats so we can tell a model failure from a near-empty
+    target. ``mask`` is (1,1,D,H,W); may be all-zero (then falls back to mid-slice)."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    tgt, prd, m = target[0, 0], pred[0, 0], mask[0, 0]            # (D,H,W) each
+    D = tgt.shape[0]
+    has_mask = bool(m.sum() > 0)
+    d = int(m.sum(dim=(1, 2)).argmax()) if has_mask else D // 2   # most-ROI slice
+
     try:
         import SimpleITK as sitk
-        for name, vol in [("target", target[0, 0]), ("pred", pred[0, 0])]:
+        for name, vol in [("target", tgt), ("pred", prd)]:
             sitk.WriteImage(sitk.GetImageFromArray(vol.numpy()),
                             str(out_dir / f"{case_id.replace('/', '_')}_{name}.nii.gz"))
     except Exception as e:  # noqa
         log.warning(f"NIfTI save skipped: {e}")
+
+    # ROI signal check: is there real enhancement in the prostate to predict?
+    if has_mask:
+        mb = m > 0.5
+        tr, pr = tgt[mb], prd[mb]
+        q = torch.tensor([0.01, 0.5, 0.99])
+        log.info(f"ROI signal [{case_id}] slice {d}/{D} nvox={int(mb.sum())} | "
+                 f"target mean={tr.mean():+.3f} std={tr.std():.3f} "
+                 f"p01/50/99={[round(float(x), 3) for x in tr.quantile(q)]} | "
+                 f"pred mean={pr.mean():+.3f} std={pr.std():.3f} "
+                 f"p01/50/99={[round(float(x), 3) for x in pr.quantile(q)]}")
+
     try:
+        import numpy as np
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        d = target.shape[2] // 2
-        panels = [("T2w", cond[0, 0, d]), ("DWI", cond[0, 1, d]), ("ADC", cond[0, 2, d]),
-                  ("DCE target", target[0, 0, d]), ("DCE pred", pred[0, 0, d])]
+        # shared DCE window from the target's ROI (or whole slice) 1-99 percentile
+        ref = tgt[m > 0.5] if has_mask else tgt
+        lo, hi = (float(x) for x in np.percentile(ref.numpy(), [1, 99]))
+        if hi <= lo:
+            lo, hi = float(tgt.min()), float(tgt.max())
+        err = (prd[d] - tgt[d]).numpy()
+        emax = max(abs(err.min()), abs(err.max()), 1e-6)
+        msl = (m[d] > 0.5).numpy()
+        panels = [("T2w", cond[0, 0, d].numpy(), None, "gray"),
+                  ("DWI", cond[0, 1, d].numpy(), None, "gray"),
+                  ("ADC", cond[0, 2, d].numpy(), None, "gray"),
+                  ("DCE target", tgt[d].numpy(), (lo, hi), "gray"),
+                  ("DCE pred", prd[d].numpy(), (lo, hi), "gray"),
+                  ("pred - target", err, (-emax, emax), "seismic")]
         fig, axes = plt.subplots(1, len(panels), figsize=(3 * len(panels), 3))
-        for ax, (title, img) in zip(axes, panels):
-            ax.imshow(img.numpy(), cmap="gray"); ax.set_title(title); ax.axis("off")
-        fig.suptitle(case_id); fig.tight_layout()
-        fig.savefig(out_dir / "montage.png", dpi=120); plt.close(fig)
+        for ax, (title, img, rng, cmap) in zip(axes, panels):
+            kw = {"cmap": cmap}
+            if rng is not None:
+                kw["vmin"], kw["vmax"] = rng
+            ax.imshow(img, **kw); ax.set_title(title, fontsize=8); ax.axis("off")
+            if msl.any() and title.startswith("DCE"):
+                ax.contour(msl, levels=[0.5], colors="lime", linewidths=0.6)
+        fig.suptitle(f"{case_id}  (slice {d}/{D}, DCE window [{lo:.2f}, {hi:.2f}])", fontsize=9)
+        fig.tight_layout()
+        fig.savefig(out_dir / "montage.png", dpi=130); plt.close(fig)
     except Exception as e:  # noqa
         log.warning(f"montage save skipped: {e}")
