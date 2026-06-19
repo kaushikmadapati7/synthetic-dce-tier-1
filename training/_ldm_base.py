@@ -25,12 +25,14 @@ def _build_ldm(args, device, flow: bool):
                           ch_mults=tuple(args.ch_mults)).to(device)
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
                        cond_channels=3, base_ch=args.base_ch, ch_mults=tuple(args.unet_ch_mults))
+    cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
-        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs).to(device)
+        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs,
+                               cfg_dropout=cfg_dropout).to(device)
     else:
         ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps,
                        beta_schedule=getattr(args, "beta_schedule", "linear"),
-                       unet_kwargs=unet_kwargs).to(device)
+                       unet_kwargs=unet_kwargs, cfg_dropout=cfg_dropout).to(device)
     return vae, ldm
 
 
@@ -55,13 +57,15 @@ def _set_scaling_factor(vae, train_loader, device, center=False):
 
 
 def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
+    w = getattr(args, "guidance_scale", 1.0)
     def gen(cond):
         cond_ds = downsample_cond(cond, lat_spatial)
         shape = (cond.size(0), args.latent_channels, *lat_spatial)
         if flow:
-            return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds)
+            return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds,
+                              guidance_scale=w)
         return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds,
-                               x0_clamp=getattr(args, "x0_clamp", 3.0))
+                               x0_clamp=getattr(args, "x0_clamp", 3.0), guidance_scale=w)
     return gen
 
 
@@ -122,13 +126,16 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
                        cond_channels=3, base_ch=args.base_ch, ch_mults=tuple(args.unet_ch_mults))
     name = "ldm_flow" if flow else "ldm_ddpm"
+    cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
-        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs).to(device)
+        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs,
+                               cfg_dropout=cfg_dropout).to(device)
     else:
         ldm = LDM_DDPM(autoencoder=vae, timesteps=args.timesteps,
                        beta_schedule=getattr(args, "beta_schedule", "linear"),
-                       unet_kwargs=unet_kwargs).to(device)
-    log.info(f"UNet params: {sum(p.numel() for p in ldm.unet.parameters())/1e6:.1f}M")
+                       unet_kwargs=unet_kwargs, cfg_dropout=cfg_dropout).to(device)
+    log.info(f"UNet params: {sum(p.numel() for p in ldm.unet.parameters())/1e6:.1f}M "
+             f"(cfg_dropout={cfg_dropout}, guidance_scale={getattr(args, 'guidance_scale', 1.0)})")
 
     opt = torch.optim.Adam(ldm.unet.parameters(), lr=args.lr)
     gen = _ldm_gen(ldm, args, lat_spatial, device, flow)

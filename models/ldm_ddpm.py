@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .unet3d import UNet3D
+from ._cfg import CFGMixin
 
 
 def make_beta_schedule(timesteps: int, schedule: str = "cosine"):
@@ -29,18 +30,20 @@ def _extract(a: torch.Tensor, t: torch.Tensor, shape) -> torch.Tensor:
     return out.view(t.shape[0], *([1] * (len(shape) - 1)))
 
 
-class LDM_DDPM(nn.Module):
+class LDM_DDPM(CFGMixin, nn.Module):
     def __init__(
         self,
         autoencoder=None,
         timesteps: int = 1000,
         beta_schedule: str = "cosine",
         unet_kwargs: dict | None = None,
+        cfg_dropout: float = 0.0,
     ):
         super().__init__()
         self.autoencoder = autoencoder  # frozen first stage (optional at construction)
         self.unet = UNet3D(**(unet_kwargs or {}))
         self.timesteps = timesteps
+        self.cfg_dropout = cfg_dropout
 
         betas = make_beta_schedule(timesteps, beta_schedule)
         alphas = 1.0 - betas
@@ -75,13 +78,13 @@ class LDM_DDPM(nn.Module):
         t = torch.randint(0, self.timesteps, (b,), device=z0.device)
         noise = torch.randn_like(z0)
         zt = self.q_sample(z0, t, noise)
-        pred = self.unet(zt, t.float(), cond=cond, labels=labels)
+        pred = self.unet(zt, t.float(), cond=self._drop_cond(cond), labels=labels)
         return F.mse_loss(pred, noise)
 
     # ---- sampling ----
     @torch.no_grad()
-    def p_sample(self, zt, t, cond=None, labels=None):
-        eps = self.unet(zt, t.float(), cond=cond, labels=labels)
+    def p_sample(self, zt, t, cond=None, labels=None, guidance_scale=1.0):
+        eps = self._guided(zt, t.float(), cond, labels, guidance_scale)
         acp = _extract(self.alphas_cumprod, t, zt.shape)
         beta = _extract(self.betas, t, zt.shape)
         sqrt_one_minus = _extract(self.sqrt_one_minus_acp, t, zt.shape)
@@ -93,21 +96,21 @@ class LDM_DDPM(nn.Module):
         return mean + torch.sqrt(var) * torch.randn_like(zt)
 
     @torch.no_grad()
-    def sample(self, shape, device, cond=None, labels=None, decode=True):
+    def sample(self, shape, device, cond=None, labels=None, decode=True, guidance_scale=1.0):
         zt = torch.randn(shape, device=device)
         for i in reversed(range(self.timesteps)):
             t = torch.full((shape[0],), i, device=device, dtype=torch.long)
-            zt = self.p_sample(zt, t, cond=cond, labels=labels)
+            zt = self.p_sample(zt, t, cond=cond, labels=labels, guidance_scale=guidance_scale)
         return self.decode(zt) if decode and self.autoencoder is not None else zt
 
     @torch.no_grad()
     def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None,
-                    decode=True, x0_clamp=0.0):
+                    decode=True, x0_clamp=0.0, guidance_scale=1.0):
         seq = torch.linspace(self.timesteps - 1, 0, steps, device=device).long()
         zt = torch.randn(shape, device=device)
         for i in range(steps):
             t = torch.full((shape[0],), seq[i], device=device, dtype=torch.long)
-            eps = self.unet(zt, t.float(), cond=cond, labels=labels)
+            eps = self._guided(zt, t.float(), cond, labels, guidance_scale)
             acp_t = _extract(self.alphas_cumprod, t, zt.shape)
             z0 = (zt - torch.sqrt(1 - acp_t) * eps) / torch.sqrt(acp_t)
             # Bound the x0 estimate: at high-noise steps alphas_cumprod -> 0, so

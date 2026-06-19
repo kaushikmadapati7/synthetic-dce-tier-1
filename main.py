@@ -242,6 +242,12 @@ def parse_args():
                         "Loose/0 lets the latent drift to garbage at high-noise steps")
     p.add_argument("--beta-schedule", choices=["cosine", "linear"], default="linear",
                    help="DDPM noise schedule; linear avoids cosine's explosive clamped-tail betas")
+    p.add_argument("--cfg-dropout", type=float, default=0.0,
+                   help="classifier-free guidance: prob of dropping the condition during "
+                        "LDM training (0 = off; 0.1 typical). Train with this to enable guidance")
+    p.add_argument("--guidance-scale", type=float, default=1.0,
+                   help="CFG sampling scale w: pred = uncond + w*(cond-uncond). 1.0 = no "
+                        "guidance; >1 sharpens conditioning (needs a cfg-dropout-trained model)")
     p.add_argument("--latent-center", action="store_true", default=False,
                    help="center the VAE latent (zero-mean) before diffusion so a DDPM's "
                         "N(0,1) prior matches; recommended for ldm_ddpm")

@@ -14,21 +14,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .unet3d import UNet3D
+from ._cfg import CFGMixin
 
 
-class LDM_FlowMatching(nn.Module):
+class LDM_FlowMatching(CFGMixin, nn.Module):
     def __init__(
         self,
         autoencoder=None,
         unet_kwargs: dict | None = None,
         time_scale: float = 1000.0,  # scales t in [0,1] before the sinusoidal embedding
         sigma_min: float = 0.0,      # >0 enables a small noise floor on the path
+        cfg_dropout: float = 0.0,
     ):
         super().__init__()
         self.autoencoder = autoencoder
         self.unet = UNet3D(**(unet_kwargs or {}))
         self.time_scale = time_scale
         self.sigma_min = sigma_min
+        self.cfg_dropout = cfg_dropout
 
     # ---- first stage helpers ----
     @torch.no_grad()
@@ -51,25 +54,25 @@ class LDM_FlowMatching(nn.Module):
         zt = (1.0 - (1.0 - self.sigma_min) * tb) * z0 + tb * noise
         target = noise - (1.0 - self.sigma_min) * z0  # dz_t/dt
 
-        pred = self.unet(zt, t * self.time_scale, cond=cond, labels=labels)
+        pred = self.unet(zt, t * self.time_scale, cond=self._drop_cond(cond), labels=labels)
         return F.mse_loss(pred, target)
 
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()
     def sample(self, shape, device, steps=50, cond=None, labels=None,
-               solver="heun", decode=True):
+               solver="heun", decode=True, guidance_scale=1.0):
         z = torch.randn(shape, device=device)
         ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
         for i in range(steps):
             t, t_next = ts[i], ts[i + 1]
             dt = t_next - t  # negative
             tb = torch.full((shape[0],), t, device=device)
-            v = self.unet(z, tb * self.time_scale, cond=cond, labels=labels)
+            v = self._guided(z, tb * self.time_scale, cond, labels, guidance_scale)
             if solver == "euler":
                 z = z + dt * v
             else:  # heun (2nd order)
                 z_pred = z + dt * v
                 tb_n = torch.full((shape[0],), t_next, device=device)
-                v_next = self.unet(z_pred, tb_n * self.time_scale, cond=cond, labels=labels)
+                v_next = self._guided(z_pred, tb_n * self.time_scale, cond, labels, guidance_scale)
                 z = z + dt * 0.5 * (v + v_next)
         return self.decode(z) if decode and self.autoencoder is not None else z

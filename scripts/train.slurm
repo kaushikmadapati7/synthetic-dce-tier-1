@@ -57,6 +57,8 @@ TIMESTEPS=${TIMESTEPS:-1000}                   # diffusion
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
 X0_CLAMP=${X0_CLAMP:-3.0}                        # ddim x0 bound (latents ~[-2.4,1.4]; 0=off, garbage)
 BETA_SCHEDULE=${BETA_SCHEDULE:-linear}          # ddpm noise schedule: linear | cosine
+CFG_DROPOUT=${CFG_DROPOUT:-0.0}                 # classifier-free guidance: cond-dropout prob in training (0.1 to enable)
+GUIDANCE_SCALE=${GUIDANCE_SCALE:-1.0}           # CFG sampling scale (1=off; >1 sharpens; needs CFG-trained model)
 LATENT_CENTER=${LATENT_CENTER:-0}               # 1 = zero-center latents (recommended for ddpm)
 VAE_CKPT=${VAE_CKPT:-}                          # reuse a trained VAE (skip stage 1)
 
@@ -126,6 +128,8 @@ ARGS=(
   --sample-steps "${SAMPLE_STEPS}"
   --x0-clamp "${X0_CLAMP}"
   --beta-schedule "${BETA_SCHEDULE}"
+  --cfg-dropout "${CFG_DROPOUT}"
+  --guidance-scale "${GUIDANCE_SCALE}"
   --l1 "${L1}"
   --ssim "${SSIM}"
   --perceptual "${PERCEPTUAL}"
