@@ -12,7 +12,8 @@ from pathlib import Path
 import torch
 
 from ..models import AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching
-from .utils import log_epoch, save_ckpt, downsample_cond
+from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
+                    val_score, save_best, best_or_last_ckpt)
 
 log = logging.getLogger("tier1")
 
@@ -59,7 +60,8 @@ def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
         shape = (cond.size(0), args.latent_channels, *lat_spatial)
         if flow:
             return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds)
-        return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds)
+        return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds,
+                               x0_clamp=getattr(args, "x0_clamp", 3.0))
     return gen
 
 
@@ -67,7 +69,7 @@ def load_ldm(args, train_loader, test_loader, device, flow: bool):
     """Rebuild the LDM, load its checkpoint, restore scaling_factor, return gen (eval-only)."""
     vae, ldm = _build_ldm(args, device, flow)
     name = "ldm_flow" if flow else "ldm_ddpm"
-    ckpt = Path(args.output_dir) / "checkpoints" / f"{name}_last.pt"
+    ckpt = best_or_last_ckpt(args.output_dir, name)
     ldm.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
     ldm.eval()
     log.info(f"loaded {name} checkpoint {ckpt}")
@@ -108,7 +110,7 @@ def train_vae(args, train_loader, criterion, device):
     return vae
 
 
-def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
+def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, flow: bool):
     vae = train_vae(args, train_loader, criterion, device)
 
     # infer latent spatial size from one encode
@@ -129,6 +131,9 @@ def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
     log.info(f"UNet params: {sum(p.numel() for p in ldm.unet.parameters())/1e6:.1f}M")
 
     opt = torch.optim.Adam(ldm.unet.parameters(), lr=args.lr)
+    gen = _ldm_gen(ldm, args, lat_spatial, device, flow)
+    val_every = args.val_every or args.ckpt_every
+    best = float("-inf")
     for epoch in range(args.epochs):
         ldm.unet.train(); t0 = time.time(); agg = {}
         for batch in train_loader:
@@ -141,5 +146,11 @@ def train_ldm(args, train_loader, test_loader, criterion, device, flow: bool):
             agg["diff"] = agg.get("diff", 0.0) + loss.item()
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
         save_ckpt(args, name, ldm, epoch, args.epochs, state_dict=True)
+        # best-checkpoint selection scores via full sampling, so honor val_every
+        # (raise it for LDMs if sampling the val set every interval is too slow)
+        if val_loader is not None and is_ckpt_epoch(epoch, args.epochs, val_every):
+            ldm.unet.eval()
+            best = save_best(args, name, ldm, val_score(gen, val_loader, device), best)
+            ldm.unet.train()
 
-    return ldm, _ldm_gen(ldm, args, lat_spatial, device, flow)
+    return ldm, gen

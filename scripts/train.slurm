@@ -46,6 +46,8 @@ VAE_EPOCHS=${VAE_EPOCHS:-50}
 BATCH_SIZE=${BATCH_SIZE:-2}
 LR=${LR:-1e-4}
 CKPT_EVERY=${CKPT_EVERY:-10}
+VAL_FRAC=${VAL_FRAC:-0.1}          # train fraction held out for best-ckpt selection (0 = off)
+VAL_EVERY=${VAL_EVERY:-0}          # epochs between val scorings (0 = use CKPT_EVERY; set 2 for GAN)
 
 # ---- model size ---------------------------------------------------------------
 BASE_CH=${BASE_CH:-32}
@@ -53,6 +55,7 @@ N_UPSAMPLES=${N_UPSAMPLES:-4}                  # GAN up/down depth
 KL_WEIGHT=${KL_WEIGHT:-1e-6}                   # VAE
 TIMESTEPS=${TIMESTEPS:-1000}                   # diffusion
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
+X0_CLAMP=${X0_CLAMP:-3.0}                        # ddim x0 bound (latents ~[-2.4,1.4]; 0=off, garbage)
 BETA_SCHEDULE=${BETA_SCHEDULE:-linear}          # ddpm noise schedule: linear | cosine
 LATENT_CENTER=${LATENT_CENTER:-0}               # 1 = zero-center latents (recommended for ddpm)
 VAE_CKPT=${VAE_CKPT:-}                          # reuse a trained VAE (skip stage 1)
@@ -113,12 +116,15 @@ ARGS=(
   --batch-size "${BATCH_SIZE}"
   --lr "${LR}"
   --ckpt-every "${CKPT_EVERY}"
+  --val-frac "${VAL_FRAC}"
+  --val-every "${VAL_EVERY}"
   --num-workers "${SLURM_CPUS_PER_TASK:-8}"
   --base-ch "${BASE_CH}"
   --n-upsamples "${N_UPSAMPLES}"
   --kl-weight "${KL_WEIGHT}"
   --timesteps "${TIMESTEPS}"
   --sample-steps "${SAMPLE_STEPS}"
+  --x0-clamp "${X0_CLAMP}"
   --beta-schedule "${BETA_SCHEDULE}"
   --l1 "${L1}"
   --ssim "${SSIM}"

@@ -110,10 +110,12 @@ class LDM_DDPM(nn.Module):
             eps = self.unet(zt, t.float(), cond=cond, labels=labels)
             acp_t = _extract(self.alphas_cumprod, t, zt.shape)
             z0 = (zt - torch.sqrt(1 - acp_t) * eps) / torch.sqrt(acp_t)
-            # Bound the x0 estimate: at high-noise steps the cosine schedule's
-            # alphas_cumprod -> 0, so 1/sqrt(acp_t) blows up any eps error into a
-            # huge z0 that corrupts the trajectory (saturated/garbage decode). The
-            # scaled latents are ~unit-std, so +/-5 sigma never clips valid values.
+            # Bound the x0 estimate: at high-noise steps alphas_cumprod -> 0, so
+            # 1/sqrt(acp_t) blows up any eps error into a huge z0 that corrupts the
+            # trajectory (drift -> saturated/garbage decode; diag_ddpm shows unbounded
+            # sampling gives L1~1.4 vs ~0.24 when bounded). The centered/scaled latents
+            # are empirically ~[-2.4, 1.4], so a clamp of ~3 keeps valid values and
+            # kills the drift. 0.0 disables (do NOT use for eval).
             if x0_clamp:
                 z0 = z0.clamp(-x0_clamp, x0_clamp)
             if i < steps - 1:

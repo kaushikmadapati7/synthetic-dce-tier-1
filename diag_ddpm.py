@@ -40,7 +40,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"model={args.model} output_dir={out} device={device}")
 
-    train_loader, test_loader = build_data(args)
+    train_loader, _, test_loader = build_data(args)
     model, _ = LOADERS[args.model](args, train_loader, test_loader, device)
     model.eval()
 

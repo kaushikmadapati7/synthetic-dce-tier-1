@@ -137,12 +137,23 @@ def build_data(args):
     if args.limit:
         train = torch.utils.data.Subset(train, range(min(args.limit, len(train))))
         test = torch.utils.data.Subset(test, range(min(max(1, args.limit // 4), len(test))))
-    log.info(f"train cases: {len(train)}  test cases: {len(test)}")
+
+    # carve a random val split off train for best-checkpoint selection (no test leakage)
+    val = None
+    if args.val_frac and len(train) >= 4:
+        n_val = max(1, int(round(len(train) * args.val_frac)))
+        n_train = len(train) - n_val
+        if n_train >= 1 and n_val >= 1:
+            g = torch.Generator().manual_seed(args.seed)
+            train, val = torch.utils.data.random_split(train, [n_train, n_val], generator=g)
+    log.info(f"train cases: {len(train)}  val cases: {len(val) if val else 0}  test cases: {len(test)}")
 
     dl = lambda ds, shuf: DataLoader(ds, batch_size=args.batch_size, shuffle=shuf,
                                      num_workers=args.num_workers, drop_last=shuf,
                                      pin_memory=torch.cuda.is_available())
-    return dl(train, True), (dl(test, False) if len(test) else None)
+    return (dl(train, True),
+            (dl(val, False) if val else None),
+            (dl(test, False) if len(test) else None))
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +173,7 @@ def main():
     log.info(f"device={device}  model={args.model}")
     log.info(f"config: {json.dumps(vars(args))}")
 
-    train_loader, test_loader = build_data(args)
+    train_loader, val_loader, test_loader = build_data(args)
 
     t0 = time.time()
     if args.eval_only:
@@ -172,7 +183,7 @@ def main():
     else:
         criterion = make_criterion(args, device)
         trainer = TRAINERS[args.model]
-        _, gen = trainer(args, train_loader, test_loader, criterion, device)
+        _, gen = trainer(args, train_loader, val_loader, test_loader, criterion, device)
         log.info(f"training done in {(time.time() - t0) / 60:.1f} min")
 
     metrics = evaluate(args, gen, test_loader, device)
@@ -207,6 +218,12 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--ckpt-every", type=int, default=10)
+    p.add_argument("--val-frac", type=float, default=0.1,
+                   help="fraction of train held out (random) for best-checkpoint "
+                        "selection; 0 disables best-ckpt tracking (eval falls back to last)")
+    p.add_argument("--val-every", type=int, default=0,
+                   help="epochs between val-score checkpoint selections; 0 = use --ckpt-every. "
+                        "Set small (e.g. 2) for the GAN, whose ROI fidelity peaks early")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="")
     p.add_argument("--limit", type=int, default=0, help="cap #cases (smoke testing)")
@@ -220,6 +237,9 @@ def parse_args():
     p.add_argument("--kl-weight", type=float, default=1e-6)
     p.add_argument("--timesteps", type=int, default=1000)
     p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--x0-clamp", type=float, default=3.0,
+                   help="DDIM x0-estimate bound (latents are ~[-2.4,1.4]; 0 disables). "
+                        "Loose/0 lets the latent drift to garbage at high-noise steps")
     p.add_argument("--beta-schedule", choices=["cosine", "linear"], default="linear",
                    help="DDPM noise schedule; linear avoids cosine's explosive clamped-tail betas")
     p.add_argument("--latent-center", action="store_true", default=False,
