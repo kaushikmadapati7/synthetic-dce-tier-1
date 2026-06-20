@@ -39,6 +39,7 @@ DCE_PHASE=${DCE_PHASE:-early}                 # zhongyiyuan target: early | peak
 TEST_HOSPITALS=${TEST_HOSPITALS:-jiulong}     # held-out center(s), space-separated
 HARMONIZE=${HARMONIZE:-1}                      # 1 = Nyul harmonization on, 0 = off
 HARMONIZE_MAX=${HARMONIZE_MAX:-200}
+T2W_NORM=${T2W_NORM:-nyul}                    # T2w INPUT norm: nyul | percentile (per-image, generalizes)
 DCE_NORM=${DCE_NORM:-percentile}              # DCE target norm: percentile | robust (bladder-insensitive)
 DCE_ROBUST_K=${DCE_ROBUST_K:-2.0}            # robust DCE half-width (body-spread units); tune via alignment probe
 
@@ -115,6 +116,7 @@ ARGS=(
   --seed "${SEED}"
   --spatial-size ${SPATIAL_SIZE}
   --reference "${REFERENCE}"
+  --t2w-norm "${T2W_NORM}"
   --dce-norm "${DCE_NORM}"
   --dce-robust-k "${DCE_ROBUST_K}"
   --dce-phase "${DCE_PHASE}"

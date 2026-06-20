@@ -27,8 +27,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .data import (PreprocessConfig, Harmonizer, build_tier1_datasets,
-                   CanonicalDCEDataset, fit_harmonizer_from_dataset,
+from .data import (PreprocessConfig, Harmonizer, HarmonizationConfig,
+                   build_tier1_datasets, CanonicalDCEDataset, fit_harmonizer_from_dataset,
                    CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
 from .training import TRAINERS, LOADERS
@@ -116,17 +116,24 @@ def build_data(args):
             harmonizer = Harmonizer.load(saved)
             log.info(f"eval-only: loaded harmonizer {saved} (skipping re-fit)")
         else:
-            harmonizer = Harmonizer()
-            harmonizer.cfg.methods["dce"] = args.dce_norm   # percentile | robust (body-tissue)
-            harmonizer.cfg.dce_robust_k = args.dce_robust_k
+            # build the config first so self.nyul reflects the methods (t2w/dce can
+            # be per-image -> no Nyul, which generalizes to held-out hospitals)
+            hcfg = HarmonizationConfig()
+            hcfg.methods = dict(hcfg.methods, t2w=args.t2w_norm, dce=args.dce_norm)
+            hcfg.dce_robust_k = args.dce_robust_k
+            harmonizer = Harmonizer(hcfg)
             fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
             fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg, **layout)
             if len(fit_ds) == 0:
                 log.warning("no canonical exams found to fit harmonizer; disabling harmonization")
                 harmonizer = None
-            else:
-                log.info(f"fitting harmonizer (Nyul) on {min(len(fit_ds), args.harmonize_max)} cases ...")
+            elif harmonizer.nyul_modalities:   # only fit if something needs Nyul
+                log.info(f"fitting Nyul {harmonizer.nyul_modalities} on "
+                         f"{min(len(fit_ds), args.harmonize_max)} cases ...")
                 fit_harmonizer_from_dataset(harmonizer, fit_ds, max_cases=args.harmonize_max)
+                harmonizer.save(out / "harmonizer.json")
+            else:                              # all per-image -> nothing to fit
+                log.info(f"harmonizer all per-image ({harmonizer.cfg.methods}); no Nyul fit needed")
                 harmonizer.save(out / "harmonizer.json")
 
     train = build_tier1_datasets(args.data_root, cfg, "train", harmonizer,
@@ -204,6 +211,10 @@ def parse_args():
     p.add_argument("--harmonize", action="store_true", default=True)
     p.add_argument("--no-harmonize", dest="harmonize", action="store_false")
     p.add_argument("--harmonize-max", type=int, default=200)
+    p.add_argument("--t2w-norm", choices=["nyul", "percentile"], default="nyul",
+                   help="T2w INPUT normalization: 'nyul' (fit on train, doesn't generalize to "
+                        "held-out sites) or 'percentile' (per-image, scanner-invariant). Use "
+                        "'percentile' to stop T2w from misleading the model on the held-out hospital")
     p.add_argument("--dce-norm", choices=["percentile", "robust"], default="percentile",
                    help="DCE target normalization: 'percentile' (per-image, bladder-sensitive) "
                         "or 'robust' (body-tissue median+/-spread, bladder-insensitive -> aligns "
