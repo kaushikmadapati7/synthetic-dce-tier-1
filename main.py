@@ -117,6 +117,8 @@ def build_data(args):
             log.info(f"eval-only: loaded harmonizer {saved} (skipping re-fit)")
         else:
             harmonizer = Harmonizer()
+            harmonizer.cfg.methods["dce"] = args.dce_norm   # percentile | robust (body-tissue)
+            harmonizer.cfg.dce_robust_k = args.dce_robust_k
             fit_hospitals = [h for h in CANONICAL_HOSPITALS if h not in test_hospitals]
             fit_ds = CanonicalDCEDataset(args.data_root, fit_hospitals, cfg, **layout)
             if len(fit_ds) == 0:
@@ -202,6 +204,13 @@ def parse_args():
     p.add_argument("--harmonize", action="store_true", default=True)
     p.add_argument("--no-harmonize", dest="harmonize", action="store_false")
     p.add_argument("--harmonize-max", type=int, default=200)
+    p.add_argument("--dce-norm", choices=["percentile", "robust"], default="percentile",
+                   help="DCE target normalization: 'percentile' (per-image, bladder-sensitive) "
+                        "or 'robust' (body-tissue median+/-spread, bladder-insensitive -> aligns "
+                        "the soft-tissue baseline across hospitals). Inputs unaffected")
+    p.add_argument("--dce-robust-k", type=float, default=2.0,
+                   help="robust DCE half-width in body-spread units (larger -> prostate maps "
+                        "lower / less saturation). Tune on the per-hospital alignment probe")
     # silver layout: <data-root>/<image-subdir|mask-subdir>/<center>/<subject>/
     p.add_argument("--image-subdir", default="Image_volumes")
     p.add_argument("--mask-subdir", default="Prostate_masks")

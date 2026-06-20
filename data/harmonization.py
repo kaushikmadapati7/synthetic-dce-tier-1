@@ -115,6 +115,31 @@ def clip_quantitative(arr, max_value: float) -> np.ndarray:
     return _to_unit(arr, 0.0, max_value)
 
 
+def robust_foreground(arr, pcts=(20.0, 80.0), k: float = 2.0) -> np.ndarray:
+    """Bladder-robust per-image DCE normalization keyed to BODY-TISSUE statistics.
+
+    Plain percentile normalization is driven by the brightest voxels, and pelvic
+    DCE has the contrast-filled bladder as a huge bright outlier that varies across
+    hospitals -> it sets the scale and compresses the prostate toward the floor
+    (verified: jiulong prostate ~-0.83 vs changshu ~-0.15 under per-image norm).
+    Instead, center on the body-foreground median and scale by a robust spread
+    (an inter-percentile width, insensitive to the bright tail); the bladder simply
+    saturates to +1. This aligns the soft-tissue baseline across scanners so the
+    prostate lands on a comparable scale, leaving only genuine enhancement
+    differences. The ROI mask is intentionally NOT used (we want body, not ROI).
+
+    The body foreground is thresholded on the volume MEDIAN, not the mean: a bright
+    bladder inflates the mean and would make the foreground definition itself
+    bladder-dependent, whereas the median is insensitive to the bright tail."""
+    fg = arr[arr > np.median(arr)]      # body tissue (excludes air); median => bladder-robust
+    if fg.size == 0:
+        fg = arr.ravel()
+    med = float(np.median(fg))
+    lo_p, hi_p = np.percentile(fg, pcts)
+    spread = float(hi_p - lo_p) + 1e-8
+    return _to_unit(arr, med - k * spread, med + k * spread)
+
+
 # ---------------------------------------------------------------------------
 # orchestrator
 # ---------------------------------------------------------------------------
@@ -130,6 +155,8 @@ class HarmonizationConfig:
     adc_max_value: float = 3000.0   # 10^-6 mm^2/s
     dwi_clip_sd: float = 3.0
     dce_percentiles: tuple = (0.5, 99.9)   # per-image DCE window (matches preprocessing.normalize)
+    dce_robust_pcts: tuple = (20.0, 80.0)  # body-tissue spread for the "robust" DCE method
+    dce_robust_k: float = 2.0              # half-width = k * (p_hi - p_lo) around the median
     nyul_i_min: float = 1.0
     nyul_i_max: float = 100.0
 
@@ -173,6 +200,8 @@ class Harmonizer:
         if meth == "percentile":
             lo, hi = np.percentile(arr, self.cfg.dce_percentiles)
             return _to_unit(arr, float(lo), float(hi))
+        if meth == "robust":
+            return robust_foreground(arr, self.cfg.dce_robust_pcts, self.cfg.dce_robust_k)
         raise ValueError(f"unknown harmonization method '{meth}' for '{modality}'")
 
     # ---- persistence ----
