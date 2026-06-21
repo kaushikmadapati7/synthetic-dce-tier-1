@@ -11,7 +11,8 @@ from pathlib import Path
 
 import torch
 
-from ..models import AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching
+from ..models import (AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching,
+                      PatchDiscriminator3D, d_hinge_loss)
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
                     val_score, save_best, best_or_last_ckpt, prep_cond)
 
@@ -103,12 +104,32 @@ def train_vae(args, train_loader, criterion, device):
         log.info(f"loaded VAE checkpoint {args.vae_ckpt}")
     else:
         opt = torch.optim.Adam(vae.parameters(), lr=args.lr)
+        # optional adversarial term: a patch discriminator sharpens reconstructions
+        # the L1/SSIM/perceptual recon loss blurs (standard LDM autoencoder recipe).
+        adv_w = getattr(args, "vae_adv_weight", 0.0)
+        warmup = getattr(args, "vae_adv_warmup", 5)
+        disc = opt_d = None
+        if adv_w > 0:
+            disc = PatchDiscriminator3D(in_channels=1, base_ch=args.base_ch).to(device)
+            opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
+            log.info(f"VAE adversarial: patch-disc on, weight={adv_w}, warmup={warmup} epochs")
         for epoch in range(args.vae_epochs):
             vae.train(); t0 = time.time(); agg = {}
+            adv_on = disc is not None and epoch >= warmup
             for batch in train_loader:
                 x = batch["target"].to(device)
                 mask = batch["mask"].to(device)
-                loss, parts = vae.loss(x, kl_weight=args.kl_weight, criterion=criterion, mask=mask)
+                recon, posterior = vae(x)
+                rec, parts = criterion(recon, x, mask)
+                loss = rec + args.kl_weight * posterior.kl()
+                parts = {**parts, "kl": posterior.kl().item()}
+                if adv_on:
+                    # discriminator step (real DCE vs detached recon)
+                    d_loss = d_hinge_loss(disc(x), disc(recon.detach()))
+                    opt_d.zero_grad(); d_loss.backward(); opt_d.step()
+                    g_adv = -disc(recon).mean()             # hinge generator term
+                    loss = loss + adv_w * g_adv
+                    parts = {**parts, "d": float(d_loss.detach()), "g_adv": float(g_adv.detach())}
                 opt.zero_grad(); loss.backward(); opt.step()
                 for k, v in {"vae": loss.item(), **parts}.items():
                     agg[k] = agg.get(k, 0.0) + v

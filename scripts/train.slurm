@@ -56,6 +56,8 @@ VAL_EVERY=${VAL_EVERY:-0}          # epochs between val scorings (0 = use CKPT_E
 BASE_CH=${BASE_CH:-32}
 N_UPSAMPLES=${N_UPSAMPLES:-4}                  # GAN up/down depth
 KL_WEIGHT=${KL_WEIGHT:-1e-6}                   # VAE
+VAE_ADV_WEIGHT=${VAE_ADV_WEIGHT:-0.0}          # VAE patch-discriminator weight (0=off; 0.1-0.5 sharpens, reduces LDM blur)
+VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adversarial term starts
 TIMESTEPS=${TIMESTEPS:-1000}                   # diffusion
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
 X0_CLAMP=${X0_CLAMP:-3.0}                        # ddim x0 bound (latents ~[-2.4,1.4]; 0=off, garbage)
@@ -133,6 +135,8 @@ ARGS=(
   --base-ch "${BASE_CH}"
   --n-upsamples "${N_UPSAMPLES}"
   --kl-weight "${KL_WEIGHT}"
+  --vae-adv-weight "${VAE_ADV_WEIGHT}"
+  --vae-adv-warmup "${VAE_ADV_WARMUP}"
   --timesteps "${TIMESTEPS}"
   --sample-steps "${SAMPLE_STEPS}"
   --x0-clamp "${X0_CLAMP}"

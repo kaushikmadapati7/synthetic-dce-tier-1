@@ -84,6 +84,28 @@ class Decoder3D(nn.Module):
         return torch.tanh(self.conv_out(F.silu(self.norm_out(h))))
 
 
+class PatchDiscriminator3D(nn.Module):
+    """PatchGAN-style 3D discriminator for VAE adversarial training (real DCE vs
+    reconstruction). The adversarial signal is what forces high-frequency detail
+    the plain L1/SSIM/perceptual recon loss smooths away (the standard LDM/VQGAN
+    autoencoder recipe). Outputs per-patch logits; use with a hinge loss."""
+
+    def __init__(self, in_channels: int = 1, base_ch: int = 32, n_layers: int = 3):
+        super().__init__()
+        layers = [nn.Conv3d(in_channels, base_ch, 4, 2, 1), nn.LeakyReLU(0.2, True)]
+        ch = base_ch
+        for i in range(1, n_layers):
+            nch = min(base_ch * 2 ** i, 256)
+            layers += [nn.Conv3d(ch, nch, 4, 2, 1), nn.GroupNorm(min(8, nch), nch),
+                       nn.LeakyReLU(0.2, True)]
+            ch = nch
+        layers += [nn.Conv3d(ch, 1, 4, 1, 1)]   # per-patch real/fake logits
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class AutoencoderKL3D(nn.Module):
     def __init__(
         self,

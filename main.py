@@ -255,6 +255,12 @@ def parse_args():
     p.add_argument("--ch-mults", type=int, nargs="+", default=[1, 2, 4], help="VAE")
     p.add_argument("--unet-ch-mults", type=int, nargs="+", default=[1, 2, 4], help="diffusion UNet")
     p.add_argument("--kl-weight", type=float, default=1e-6)
+    p.add_argument("--vae-adv-weight", type=float, default=0.0,
+                   help="adversarial (patch-discriminator) weight in VAE training; 0=off. "
+                        "Sharpens reconstructions the L1/SSIM/perceptual loss blurs (standard "
+                        "LDM autoencoder recipe). Try 0.1-0.5 to reduce LDM blur")
+    p.add_argument("--vae-adv-warmup", type=int, default=5,
+                   help="epochs of pure reconstruction before the VAE adversarial term kicks in")
     p.add_argument("--timesteps", type=int, default=1000)
     p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--x0-clamp", type=float, default=3.0,
