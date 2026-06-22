@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .unet3d import UNet3D
-from ._cfg import CFGMixin
+from ._cfg import CFGMixin, roi_weighted_mse
 
 
 class LDM_FlowMatching(CFGMixin, nn.Module):
@@ -44,8 +44,9 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         return self.autoencoder.decode(z)
 
     # ---- training ----
-    def loss(self, z0, cond=None, labels=None):
-        """z0: clean latent. t=0 -> data, t=1 -> noise."""
+    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0):
+        """z0: clean latent. t=0 -> data, t=1 -> noise. ``mask`` (latent-grid
+        prostate mask) + roi_weight give the diffusion objective ROI emphasis."""
         b = z0.shape[0]
         t = torch.rand(b, device=z0.device)
         noise = torch.randn_like(z0)
@@ -55,7 +56,7 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         target = noise - (1.0 - self.sigma_min) * z0  # dz_t/dt
 
         pred = self.unet(zt, t * self.time_scale, cond=self._drop_cond(cond), labels=labels)
-        return F.mse_loss(pred, target)
+        return roi_weighted_mse(pred, target, mask, roi_weight)
 
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()

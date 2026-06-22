@@ -16,6 +16,20 @@ no-op). A learned null embedding is a possible later refinement.
 import torch
 
 
+def roi_weighted_mse(pred, target, mask=None, roi_weight=1.0):
+    """MSE that upweights ROI voxels by ``roi_weight``. ``mask`` is the prostate
+    mask downsampled to the latent grid (soft values in [0,1]). This gives the
+    latent-diffusion objective the same direct prostate emphasis the GAN's recon
+    loss has -- otherwise the diffusion MSE is ~99% background and the prostate
+    (~1% of voxels) barely contributes to the gradient. No mask / roi_weight<=1
+    -> plain MSE."""
+    se = (pred - target) ** 2
+    if mask is None or roi_weight <= 1.0:
+        return se.mean()
+    w = 1.0 + (roi_weight - 1.0) * mask        # (B,1,...) broadcasts over latent channels
+    return (se * w).mean() / w.mean()          # weighted mean -> stable scale
+
+
 class CFGMixin:
     cfg_dropout: float = 0.0  # training: prob a sample's cond is replaced by null
 

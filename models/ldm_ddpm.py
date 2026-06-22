@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .unet3d import UNet3D
-from ._cfg import CFGMixin
+from ._cfg import CFGMixin, roi_weighted_mse
 
 
 def make_beta_schedule(timesteps: int, schedule: str = "cosine"):
@@ -72,14 +72,15 @@ class LDM_DDPM(CFGMixin, nn.Module):
         return _extract(self.sqrt_acp, t, z0.shape) * z0 + \
             _extract(self.sqrt_one_minus_acp, t, z0.shape) * noise
 
-    def loss(self, z0, cond=None, labels=None):
-        """z0: a clean latent (encode your volume first, or pass latents directly)."""
+    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0):
+        """z0: a clean latent. ``mask`` (latent-grid prostate mask) + roi_weight
+        give the noise-prediction objective ROI emphasis."""
         b = z0.shape[0]
         t = torch.randint(0, self.timesteps, (b,), device=z0.device)
         noise = torch.randn_like(z0)
         zt = self.q_sample(z0, t, noise)
         pred = self.unet(zt, t.float(), cond=self._drop_cond(cond), labels=labels)
-        return F.mse_loss(pred, noise)
+        return roi_weighted_mse(pred, noise, mask, roi_weight)
 
     # ---- sampling ----
     @torch.no_grad()

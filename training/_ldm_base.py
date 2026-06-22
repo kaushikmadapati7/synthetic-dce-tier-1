@@ -175,10 +175,12 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
         ldm.unet.train(); t0 = time.time(); agg = {}
         for batch in train_loader:
             cond = prep_cond(batch["cond"].to(device), args, training=True)  # Layer-1 dropout
+            mask = batch["mask"].to(device)
             with torch.no_grad():
                 z0 = ldm.encode(batch["target"].to(device))
             cond_ds = downsample_cond(cond, z0.shape[2:])
-            loss = ldm.loss(z0, cond=cond_ds)
+            mask_ds = downsample_cond(mask, z0.shape[2:])          # prostate mask -> latent grid
+            loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight)
             opt.zero_grad(); loss.backward(); opt.step()
             agg["diff"] = agg.get("diff", 0.0) + loss.item()
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
