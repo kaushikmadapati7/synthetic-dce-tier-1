@@ -44,9 +44,17 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         return self.autoencoder.decode(z)
 
     # ---- training ----
-    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0):
+    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0,
+             anchor_image=None, anchor_mask=None, anchor_criterion=None, anchor_weight=0.0):
         """z0: clean latent. t=0 -> data, t=1 -> noise. ``mask`` (latent-grid
-        prostate mask) + roi_weight give the diffusion objective ROI emphasis."""
+        prostate mask) + roi_weight give the latent objective ROI emphasis.
+
+        Trajectory anchoring (adapted from FlowMI for a noise->data flow): when
+        anchor_weight>0, decode the predicted CLEAN latent z0_hat = z_t - t*v and
+        supervise it in IMAGE space with anchor_criterion (L1/SSIM/perceptual, ROI-
+        weighted). This gives the flow the same direct image-space prostate signal
+        the GAN's recon loss has -- the latent-MSE objective alone never sees the
+        decoder, which is why the LDM blurs."""
         b = z0.shape[0]
         t = torch.rand(b, device=z0.device)
         noise = torch.randn_like(z0)
@@ -56,7 +64,14 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         target = noise - (1.0 - self.sigma_min) * z0  # dz_t/dt
 
         pred = self.unet(zt, t * self.time_scale, cond=self._drop_cond(cond), labels=labels)
-        return roi_weighted_mse(pred, target, mask, roi_weight)
+        loss = roi_weighted_mse(pred, target, mask, roi_weight)
+
+        if anchor_weight > 0 and anchor_image is not None and self.autoencoder is not None:
+            z0_hat = zt - tb * pred                       # predicted clean latent (holds for any sigma_min)
+            img = self.autoencoder.decoder(z0_hat / self.autoencoder.scaling_factor
+                                           + self.autoencoder.latent_shift)  # grad-enabled decode
+            loss = loss + anchor_weight * anchor_criterion(img, anchor_image, anchor_mask)[0]
+        return loss
 
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()

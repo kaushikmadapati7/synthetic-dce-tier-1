@@ -176,11 +176,16 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
         for batch in train_loader:
             cond = prep_cond(batch["cond"].to(device), args, training=True)  # Layer-1 dropout
             mask = batch["mask"].to(device)
+            target_img = batch["target"].to(device)
             with torch.no_grad():
-                z0 = ldm.encode(batch["target"].to(device))
+                z0 = ldm.encode(target_img)
             cond_ds = downsample_cond(cond, z0.shape[2:])
             mask_ds = downsample_cond(mask, z0.shape[2:])          # prostate mask -> latent grid
-            loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight)
+            anchor_kw = {}
+            if flow and getattr(args, "anchor_weight", 0.0) > 0:  # FlowMI-style image-space anchoring
+                anchor_kw = dict(anchor_image=target_img, anchor_mask=mask,
+                                 anchor_criterion=criterion, anchor_weight=args.anchor_weight)
+            loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight, **anchor_kw)
             opt.zero_grad(); loss.backward(); opt.step()
             agg["diff"] = agg.get("diff", 0.0) + loss.item()
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)

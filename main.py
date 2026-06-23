@@ -261,6 +261,10 @@ def parse_args():
                         "LDM autoencoder recipe). Try 0.1-0.5 to reduce LDM blur")
     p.add_argument("--vae-adv-warmup", type=int, default=5,
                    help="epochs of pure reconstruction before the VAE adversarial term kicks in")
+    p.add_argument("--anchor-weight", type=float, default=0.0,
+                   help="flow trajectory-anchoring weight (FlowMI-style): decode the predicted "
+                        "clean latent and add an image-space ROI recon loss; 0=off. Gives the "
+                        "flow LDM the direct prostate supervision the GAN has. Try 0.5-1.0")
     p.add_argument("--timesteps", type=int, default=1000)
     p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--x0-clamp", type=float, default=3.0,
