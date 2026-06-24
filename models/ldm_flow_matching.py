@@ -45,7 +45,8 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
 
     # ---- training ----
     def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0,
-             anchor_image=None, anchor_mask=None, anchor_criterion=None, anchor_weight=0.0):
+             anchor_image=None, anchor_mask=None, anchor_criterion=None, anchor_weight=0.0,
+             anchor_t_max=1.0):
         """z0: clean latent. t=0 -> data, t=1 -> noise. ``mask`` (latent-grid
         prostate mask) + roi_weight give the latent objective ROI emphasis.
 
@@ -67,10 +68,12 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         loss = roi_weighted_mse(pred, target, mask, roi_weight)
 
         if anchor_weight > 0 and anchor_image is not None and self.autoencoder is not None:
-            z0_hat = zt - tb * pred                       # predicted clean latent (holds for any sigma_min)
-            img = self.autoencoder.decoder(z0_hat / self.autoencoder.scaling_factor
-                                           + self.autoencoder.latent_shift)  # grad-enabled decode
-            loss = loss + anchor_weight * anchor_criterion(img, anchor_image, anchor_mask)[0]
+            lo = t < anchor_t_max                         # only anchor where z0_hat is a sharp estimate
+            if lo.any():                                  # (high-t decode is noisy -> dilutes the signal)
+                z0_hat = zt[lo] - tb[lo] * pred[lo]       # predicted clean latent (holds for any sigma_min)
+                img = self.autoencoder.decoder(z0_hat / self.autoencoder.scaling_factor
+                                               + self.autoencoder.latent_shift)  # grad-enabled decode
+                loss = loss + anchor_weight * anchor_criterion(img, anchor_image[lo], anchor_mask[lo])[0]
         return loss
 
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----

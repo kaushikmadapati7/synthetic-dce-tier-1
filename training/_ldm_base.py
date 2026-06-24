@@ -184,7 +184,8 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
             anchor_kw = {}
             if flow and getattr(args, "anchor_weight", 0.0) > 0:  # FlowMI-style image-space anchoring
                 anchor_kw = dict(anchor_image=target_img, anchor_mask=mask,
-                                 anchor_criterion=criterion, anchor_weight=args.anchor_weight)
+                                 anchor_criterion=criterion, anchor_weight=args.anchor_weight,
+                                 anchor_t_max=getattr(args, "anchor_t_max", 1.0))
             loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight, **anchor_kw)
             opt.zero_grad(); loss.backward(); opt.step()
             agg["diff"] = agg.get("diff", 0.0) + loss.item()

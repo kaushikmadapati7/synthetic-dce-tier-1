@@ -264,7 +264,10 @@ def parse_args():
     p.add_argument("--anchor-weight", type=float, default=0.0,
                    help="flow trajectory-anchoring weight (FlowMI-style): decode the predicted "
                         "clean latent and add an image-space ROI recon loss; 0=off. Gives the "
-                        "flow LDM the direct prostate supervision the GAN has. Try 0.5-1.0")
+                        "flow LDM the direct prostate supervision the GAN has. Try 0.5-2.0")
+    p.add_argument("--anchor-t-max", type=float, default=1.0,
+                   help="only apply the anchor for t < this (1.0 = all t). The clean-latent "
+                        "estimate is noisy at high t; 0.5 restricts it to the reliable low-noise regime")
     p.add_argument("--timesteps", type=int, default=1000)
     p.add_argument("--sample-steps", type=int, default=50)
     p.add_argument("--x0-clamp", type=float, default=3.0,

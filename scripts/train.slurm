@@ -58,7 +58,8 @@ N_UPSAMPLES=${N_UPSAMPLES:-4}                  # GAN up/down depth
 KL_WEIGHT=${KL_WEIGHT:-1e-6}                   # VAE
 VAE_ADV_WEIGHT=${VAE_ADV_WEIGHT:-0.0}          # VAE patch-discriminator weight (0=off; 0.1-0.5 sharpens, reduces LDM blur)
 VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adversarial term starts
-ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # flow trajectory-anchoring (FlowMI-style image-space recon); 0=off, try 0.5-1.0
+ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # flow trajectory-anchoring (FlowMI-style image-space recon); 0=off, try 0.5-2.0
+ANCHOR_T_MAX=${ANCHOR_T_MAX:-1.0}             # only anchor for t<this (1.0=all; 0.5=reliable low-noise regime)
 TIMESTEPS=${TIMESTEPS:-1000}                   # diffusion
 SAMPLE_STEPS=${SAMPLE_STEPS:-50}
 X0_CLAMP=${X0_CLAMP:-3.0}                        # ddim x0 bound (latents ~[-2.4,1.4]; 0=off, garbage)
@@ -139,6 +140,7 @@ ARGS=(
   --vae-adv-weight "${VAE_ADV_WEIGHT}"
   --vae-adv-warmup "${VAE_ADV_WARMUP}"
   --anchor-weight "${ANCHOR_WEIGHT}"
+  --anchor-t-max "${ANCHOR_T_MAX}"
   --timesteps "${TIMESTEPS}"
   --sample-steps "${SAMPLE_STEPS}"
   --x0-clamp "${X0_CLAMP}"
