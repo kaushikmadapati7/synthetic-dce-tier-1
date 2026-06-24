@@ -49,7 +49,27 @@ def evaluate(args, gen, test_loader, device):
     return metrics
 
 
-def save_samples(out_dir: Path, cond, target, pred, mask, case_id):
+@torch.no_grad()
+def save_indist_sample(args, gen, loader, device, montage_name="montage_indist"):
+    """Qualitative sample from an IN-DISTRIBUTION (val) case. The held-out test
+    montage is the hardest/most-confounded case (e.g. jiulong's flat, domain-shifted
+    target) and undersells the model where its training distribution covers the site.
+    This dumps the honest 'does it track enhancement' view -> samples/montage_indist.png."""
+    if loader is None:
+        log.info("no val loader; skipping in-distribution montage")
+        return
+    batch = next(iter(loader))
+    cond = batch["cond"].to(device); target = batch["target"].to(device)
+    mask = batch["mask"].to(device)
+    pred = gen(cond).clamp(-1, 1)
+    if pred.shape != target.shape:
+        pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
+    log.info(f"in-distribution sample [{batch['id'][0]}] (val)")
+    save_samples(Path(args.output_dir) / "samples", cond.cpu(), target.cpu(), pred.cpu(),
+                 mask.cpu(), "indist_" + batch["id"][0], montage_name=montage_name)
+
+
+def save_samples(out_dir: Path, cond, target, pred, mask, case_id, montage_name="montage"):
     """Qualitative dump for one case. Unlike a naive mid-slice montage, this picks
     the slice with the most prostate-mask voxels, windows the DCE consistently
     (shared robust percentile range, so a single hot vessel voxel can't crush the
@@ -110,6 +130,6 @@ def save_samples(out_dir: Path, cond, target, pred, mask, case_id):
                 ax.contour(msl, levels=[0.5], colors="lime", linewidths=0.6)
         fig.suptitle(f"{case_id}  (slice {d}/{D}, DCE window [{lo:.2f}, {hi:.2f}])", fontsize=9)
         fig.tight_layout()
-        fig.savefig(out_dir / "montage.png", dpi=130); plt.close(fig)
+        fig.savefig(out_dir / f"{montage_name}.png", dpi=130); plt.close(fig)
     except Exception as e:  # noqa
         log.warning(f"montage save skipped: {e}")

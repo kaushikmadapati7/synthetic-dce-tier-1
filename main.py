@@ -32,7 +32,7 @@ from .data import (PreprocessConfig, Harmonizer, HarmonizationConfig,
                    CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
 from .training import TRAINERS, LOADERS
-from .eval import evaluate
+from .eval import evaluate, save_indist_sample
 
 log = logging.getLogger("tier1")
 
@@ -196,6 +196,7 @@ def main():
         log.info(f"training done in {(time.time() - t0) / 60:.1f} min")
 
     metrics = evaluate(args, gen, test_loader, device)
+    save_indist_sample(args, gen, val_loader, device)   # in-distribution (val) montage
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     log.info(f"artifacts written to {out}")
 
