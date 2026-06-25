@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from .metrics import eval_metrics, aggregate, compute_fid
+from .metrics import eval_metrics, aggregate, compute_fid, roi_p75, pearson
 
 log = logging.getLogger("tier1")
 
@@ -22,6 +22,7 @@ def evaluate(args, gen, test_loader, device):
         return {}
     per_batch, first = [], None
     all_preds, all_targets = [], []
+    p75_real, p75_pred = [], []   # per-case ROI enhancement level -> cross-case scatter
     compute_fid_flag = getattr(args, "compute_fid", True)
     for batch in test_loader:
         cond = batch["cond"].to(device); target = batch["target"].to(device)
@@ -30,6 +31,10 @@ def evaluate(args, gen, test_loader, device):
         if pred.shape != target.shape:  # guard against any model/target size mismatch
             pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
         per_batch.append(eval_metrics(pred, target, mask))
+        for i in range(pred.size(0)):
+            rr = roi_p75(target[i:i+1], mask[i:i+1]); pp = roi_p75(pred[i:i+1], mask[i:i+1])
+            if rr is not None and pp is not None:
+                p75_real.append(rr); p75_pred.append(pp)
         if compute_fid_flag:
             for i in range(pred.size(0)):
                 all_preds.append(pred[i].cpu())
@@ -37,6 +42,10 @@ def evaluate(args, gen, test_loader, device):
         if first is None:
             first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), batch["id"][0])
     metrics = aggregate(per_batch)
+    # cross-case "does synthetic enhancement track real" (their Fig. scatter r)
+    p75_corr = pearson(p75_real, p75_pred)
+    if p75_corr is not None:
+        metrics["p75_corr"] = p75_corr
     if compute_fid_flag and all_preds:
         fid = compute_fid(all_preds, all_targets, device,
                           slices_per_volume=getattr(args, "fid_slices", 8),
