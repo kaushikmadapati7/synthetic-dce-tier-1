@@ -14,7 +14,7 @@ import torch
 from ..models import (AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching,
                       PatchDiscriminator3D, d_hinge_loss)
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
-                    val_score, save_best, best_or_last_ckpt, prep_cond)
+                    val_score, save_best, best_or_last_ckpt, prep_cond, EMA)
 
 log = logging.getLogger("tier1")
 
@@ -168,6 +168,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
              f"(cfg_dropout={cfg_dropout}, guidance_scale={getattr(args, 'guidance_scale', 1.0)})")
 
     opt = torch.optim.Adam(ldm.unet.parameters(), lr=args.lr)
+    ema = EMA(ldm.unet, args.ema_decay) if getattr(args, "ema_decay", 0.0) > 0 else None
     gen = _ldm_gen(ldm, args, lat_spatial, device, flow)
     val_every = args.val_every or args.ckpt_every
     best = float("-inf")
@@ -188,6 +189,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
             loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight, **anchor_kw)
             opt.zero_grad(); loss.backward(); opt.step()
+            if ema: ema.update(ldm.unet)
             agg["diff"] = agg.get("diff", 0.0) + loss.item()
         log_epoch(epoch, args.epochs, agg, len(train_loader), time.time() - t0)
         save_ckpt(args, name, ldm, epoch, args.epochs, state_dict=True)
@@ -195,7 +197,14 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
         # (raise it for LDMs if sampling the val set every interval is too slow)
         if val_loader is not None and is_ckpt_epoch(epoch, args.epochs, val_every):
             ldm.unet.eval()
+            if ema: ema.apply_to(ldm.unet)        # score + save the EMA weights
             best = save_best(args, name, ldm, val_score(gen, val_loader, device), best)
+            if ema: ema.restore(ldm.unet)
             ldm.unet.train()
 
+    if ema:                                       # bake EMA into the returned gen + final ckpt
+        ema.apply_to(ldm.unet)
+        ckpt_dir = Path(args.output_dir) / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(ldm.state_dict(), ckpt_dir / f"{name}_last.pt")
     return ldm, gen

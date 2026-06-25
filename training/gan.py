@@ -9,7 +9,8 @@ from pathlib import Path
 import torch
 
 from ..models import ConditionalGAN3D, d_hinge_loss, g_total_loss
-from .utils import log_epoch, save_ckpt, is_ckpt_epoch, val_score, save_best, best_or_last_ckpt
+from .utils import (log_epoch, save_ckpt, is_ckpt_epoch, val_score, save_best,
+                    best_or_last_ckpt, EMA)
 
 log = logging.getLogger("tier1")
 
@@ -48,6 +49,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
              f"D={sum(p.numel() for p in gan.discriminator.parameters())/1e6:.1f}M")
     opt_g = torch.optim.Adam(gan.generator.parameters(), lr=args.lr, betas=(0.5, 0.999))
     opt_d = torch.optim.Adam(gan.discriminator.parameters(), lr=args.lr, betas=(0.5, 0.999))
+    ema = EMA(gan.generator, args.ema_decay) if getattr(args, "ema_decay", 0.0) > 0 else None
 
     val_every = args.val_every or args.ckpt_every
     best = float("-inf")
@@ -67,6 +69,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
                                          fake, real, criterion, adv_weight=args.adv_weight,
                                          mask=mask)
             opt_g.zero_grad(); g_loss.backward(); opt_g.step()
+            if ema: ema.update(gan.generator)
 
             for k, v in {"d": float(d_loss.detach()), "g": float(g_loss.detach()), **parts}.items():
                 agg[k] = agg.get(k, 0.0) + v
@@ -74,8 +77,15 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
         save_ckpt(args, "gan", gan, epoch, args.epochs)
         if val_loader is not None and is_ckpt_epoch(epoch, args.epochs, val_every):
             gan.eval()
+            if ema: ema.apply_to(gan.generator)   # score + save the EMA generator
             best = save_best(args, "gan", gan, val_score(_gan_gen(gan, args, device),
                                                          val_loader, device), best)
+            if ema: ema.restore(gan.generator)
             gan.train()
 
+    if ema:                                       # bake EMA into the returned gen + final ckpt
+        ema.apply_to(gan.generator)
+        d = Path(args.output_dir) / "checkpoints"
+        d.mkdir(parents=True, exist_ok=True)
+        torch.save(gan.state_dict(), d / "gan_last.pt")
     return gan, _gan_gen(gan, args, device)

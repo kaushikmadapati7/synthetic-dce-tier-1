@@ -205,6 +205,71 @@ class MedicalNetPerceptual(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Clinical / radiomics-aware terms (3D ports of the ClinDCE losses)
+#
+# A pixel-fidelity objective (L1/SSIM) flattens the focal-enhancement signal that
+# is the whole clinical point of DCE. These terms target it directly, inside the
+# prostate ROI. Intensities are mapped [-1,1] -> [0,1] first so the enhancement-
+# ratio feature (which assumes non-negative signal) stays well-behaved. Both are
+# gated behind weights that default to 0 (byte-for-byte no-op when off).
+# ---------------------------------------------------------------------------
+def _to01(x: torch.Tensor) -> torch.Tensor:
+    return (x + 1.0) * 0.5
+
+
+def regional_radiomics_loss3d(pred, target, mask, patch_size: int = 7):
+    """Regional Radiomics Consistency Loss (ClinDCE), 3D. Local avg-pool feature
+    MAPS (mean / variance / upper-mean / enhancement-ratio) matched within the
+    mask, so *where* enhancement differs is penalized -- not just global stats."""
+    p, t, m = _to01(pred), _to01(target), mask
+    pad = patch_size // 2
+    pool = lambda z: F.avg_pool3d(z, patch_size, stride=1, padding=pad)
+    count = pool(m).clamp(min=1e-6)
+
+    p_mean = pool(p * m) / count
+    t_mean = pool(t * m) / count
+    p_var = pool((p - p_mean) ** 2 * m) / count
+    t_var = pool((t - t_mean) ** 2 * m) / count
+
+    up_p = F.relu(p - p_mean) * m            # above-local-mean ~ upper distribution
+    up_t = F.relu(t - t_mean) * m
+    up_count = pool((up_t > 0).float() * m).clamp(min=1e-6)
+    p_upper = pool(up_p) / up_count
+    t_upper = pool(up_t) / up_count
+
+    p_ratio = p_upper / (p_mean.abs() + 1e-6)   # enhancement ratio ~ Ktrans proxy
+    t_ratio = t_upper / (t_mean.abs() + 1e-6)
+
+    return (F.l1_loss(p_mean * m, t_mean * m) + F.l1_loss(p_var * m, t_var * m)
+            + F.l1_loss(p_upper * m, t_upper * m) + F.l1_loss(p_ratio * m, t_ratio * m))
+
+
+def focal_enhancement_loss3d(pred, target, mask, patch_size: int = 7,
+                             threshold_std: float = 1.5):
+    """Match intensity in focal-enhancement regions (PI-RADS positivity) AND
+    penalize over-enhancement of non-focal tissue. The symmetric over-enhancement
+    term is the fix ClinDCE needed to stop the model brightening everything to
+    satisfy the focal-matching term alone."""
+    p, t, m = _to01(pred), _to01(target), mask
+    pad = patch_size // 2
+    pool = lambda z: F.avg_pool3d(z, patch_size, stride=1, padding=pad)
+    tm = t * m
+    local_mean = pool(tm)
+    local_std = torch.sqrt(F.relu(pool((tm - local_mean) ** 2)) + 1e-8)
+    focal = ((tm - local_mean) > threshold_std * local_std).float() * m
+    if focal.sum() < 10:
+        return pred.new_zeros(())
+    loss_focal = F.l1_loss(p * focal, t * focal)
+    non_focal = m * (1.0 - focal)
+    if non_focal.sum() > 10:
+        over = F.relu(p * non_focal - t * non_focal)
+        loss_over = over.sum() / non_focal.sum().clamp(min=1)
+    else:
+        loss_over = pred.new_zeros(())
+    return loss_focal + 0.5 * loss_over
+
+
+# ---------------------------------------------------------------------------
 # Combined loss
 # ---------------------------------------------------------------------------
 class CustomLoss(nn.Module):
@@ -218,6 +283,13 @@ class CustomLoss(nn.Module):
     ``roi_weight > 1``, the L1 term is reweighted so ROI voxels count
     ``roi_weight``x more, and an extra ROI-SSIM term is added. With no mask (or
     an empty one) the behaviour is identical to the unweighted loss.
+
+    Clinical terms (ClinDCE-style): when a mask is present and ``radio_weight``
+    / ``focal_weight`` > 0, regional-radiomics and focal-enhancement losses are
+    added to directly preserve the focal-enhancement signal a pixel-fidelity
+    objective flattens. Both default to 0 (off). Because this criterion is reused
+    as the GAN recon term, the VAE recon term, AND the flow's trajectory-anchor
+    criterion, enabling them propagates to all three models at once.
     """
 
     def __init__(
@@ -226,6 +298,8 @@ class CustomLoss(nn.Module):
         ssim_weight: float = 1.0,
         perceptual_weight: float = 1.0,
         roi_weight: float = 1.0,
+        radio_weight: float = 0.0,
+        focal_weight: float = 0.0,
         perceptual_depth: int = 18,
         perceptual_shortcut: str = "A",
         medicalnet_weights: str | None = None,
@@ -239,6 +313,8 @@ class CustomLoss(nn.Module):
         self.ssim_w = ssim_weight
         self.perc_w = perceptual_weight
         self.roi_w = roi_weight
+        self.radio_w = radio_weight
+        self.focal_w = focal_weight
         self.ssim_window = ssim_window
         self.ssim_sigma = ssim_sigma
         self.data_range = data_range
@@ -254,6 +330,7 @@ class CustomLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
                 mask: torch.Tensor | None = None):
         use_roi = self._has_roi(mask)
+        has_mask = mask is not None and mask.sum() > 0
 
         # L1: reweighted so ROI voxels dominate the gradient (also lifts ROI PSNR)
         if use_roi:
@@ -275,8 +352,18 @@ class CustomLoss(nn.Module):
 
         perc = (self.perceptual(pred, target)
                 if self.perceptual is not None else pred.new_zeros(()))
+
+        # Clinical terms (ClinDCE): preserve focal-enhancement / radiomic signal.
+        radio = (regional_radiomics_loss3d(pred, target, mask)
+                 if self.radio_w > 0 and has_mask else pred.new_zeros(()))
+        focal = (focal_enhancement_loss3d(pred, target, mask)
+                 if self.focal_w > 0 and has_mask else pred.new_zeros(()))
+
         total = (self.l1_w * l1 + self.ssim_w * ssim_l
-                 + self.ssim_w * ssim_roi_l + self.perc_w * perc)
+                 + self.ssim_w * ssim_roi_l + self.perc_w * perc
+                 + self.radio_w * radio + self.focal_w * focal)
         return total, {"l1": l1.item(), "ssim": ssim_l.item(),
                        "ssim_roi": float(ssim_roi_l.detach() if use_roi else 0.0),
-                       "perceptual": float(perc.detach())}
+                       "perceptual": float(perc.detach()),
+                       "radio": float(radio.detach() if self.radio_w > 0 else 0.0),
+                       "focal": float(focal.detach() if self.focal_w > 0 else 0.0)}

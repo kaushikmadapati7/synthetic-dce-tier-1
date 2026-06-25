@@ -63,6 +63,47 @@ def save_best(args, name, model, score, best):
     return score
 
 
+class EMA:
+    """Exponential moving average of a module's float parameters.
+
+    Buffers are left untouched -- our UNet/generator use GroupNorm (no running
+    stats), so tracking parameters is sufficient and avoids the dtype pitfalls of
+    EMA-ing integer buffers (e.g. BatchNorm's num_batches_tracked). Usage::
+
+        ema = EMA(model, decay)          # after building the model
+        ...; opt.step(); ema.update(model)   # every step
+        ema.apply_to(model); score(); ema.restore(model)   # eval on EMA weights
+        ema.apply_to(model)              # bake EMA in permanently before saving
+    """
+
+    def __init__(self, module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {n: p.detach().clone()
+                       for n, p in module.named_parameters() if p.dtype.is_floating_point}
+        self.backup: dict = {}
+
+    @torch.no_grad()
+    def update(self, module):
+        for n, p in module.named_parameters():
+            if n in self.shadow:
+                self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_to(self, module):
+        self.backup = {n: p.detach().clone()
+                       for n, p in module.named_parameters() if n in self.shadow}
+        for n, p in module.named_parameters():
+            if n in self.shadow:
+                p.copy_(self.shadow[n])
+
+    @torch.no_grad()
+    def restore(self, module):
+        for n, p in module.named_parameters():
+            if n in self.backup:
+                p.copy_(self.backup[n])
+        self.backup = {}
+
+
 def best_or_last_ckpt(output_dir, name):
     """Prefer ``{name}_best.pt`` (peak val score) over ``{name}_last.pt`` (final
     epoch) for eval-only loading; fall back to last when no best was saved."""

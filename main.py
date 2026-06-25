@@ -95,6 +95,7 @@ def make_criterion(args, device) -> CustomLoss:
     return CustomLoss(
         l1_weight=args.l1, ssim_weight=args.ssim, perceptual_weight=args.perceptual,
         roi_weight=args.roi_weight,
+        radio_weight=args.radio_weight, focal_weight=args.focal_weight,
         perceptual_depth=args.perceptual_depth, perceptual_shortcut=args.perceptual_shortcut,
         medicalnet_weights=args.medicalnet_weights,
     ).to(device)
@@ -308,6 +309,15 @@ def parse_args():
     p.add_argument("--roi-weight", type=float, default=10.0,
                    help="how much more ROI voxels count in the recon loss (1.0 = off; "
                         "needs prostate masks in the data)")
+    p.add_argument("--radio-weight", type=float, default=0.0,
+                   help="ClinDCE regional-radiomics loss weight (0=off; try 0.1). Preserves "
+                        "local enhancement feature maps inside the prostate; needs masks")
+    p.add_argument("--focal-weight", type=float, default=0.0,
+                   help="ClinDCE focal-enhancement loss weight (0=off; try 0.1). Matches "
+                        "focal (PI-RADS-positive) regions + penalizes over-enhancement")
+    p.add_argument("--ema-decay", type=float, default=0.999,
+                   help="EMA decay for the generator/UNet weights (0=off). EMA weights are "
+                        "used for best-ckpt scoring, eval, and the saved checkpoints")
     # evaluation
     p.add_argument("--eval-only", action="store_true", default=False,
                    help="skip training: load the model from --output-dir/checkpoints and "
