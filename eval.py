@@ -60,22 +60,41 @@ def evaluate(args, gen, test_loader, device):
 
 @torch.no_grad()
 def save_indist_sample(args, gen, loader, device, montage_name="montage_indist"):
-    """Qualitative sample from an IN-DISTRIBUTION (val) case. The held-out test
-    montage is the hardest/most-confounded case (e.g. jiulong's flat, domain-shifted
-    target) and undersells the model where its training distribution covers the site.
-    This dumps the honest 'does it track enhancement' view -> samples/montage_indist.png."""
+    """IN-DISTRIBUTION (val) evaluation + qualitative sample. The held-out TEST
+    center (jiulong) has near-flat DCE targets (std ~0.03), which both undersells
+    the model and makes the ROI radiomic metrics meaningless -- ``roi_var_ratio``
+    explodes against ~zero target variance, and ``roi_pearson``/``p75_corr`` have
+    no enhancement gradient to track. The val split is the only place the clinical-
+    fidelity numbers are interpretable, so we aggregate them here and log a
+    ``VAL metrics:`` line, plus the montage -> samples/montage_indist.png."""
     if loader is None:
-        log.info("no val loader; skipping in-distribution montage")
+        log.info("no val loader; skipping in-distribution eval")
         return
-    batch = next(iter(loader))
-    cond = batch["cond"].to(device); target = batch["target"].to(device)
-    mask = batch["mask"].to(device)
-    pred = gen(cond).clamp(-1, 1)
-    if pred.shape != target.shape:
-        pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
-    log.info(f"in-distribution sample [{batch['id'][0]}] (val)")
-    save_samples(Path(args.output_dir) / "samples", cond.cpu(), target.cpu(), pred.cpu(),
-                 mask.cpu(), "indist_" + batch["id"][0], montage_name=montage_name)
+    per_batch, p75_real, p75_pred, first = [], [], [], None
+    for batch in loader:
+        cond = batch["cond"].to(device); target = batch["target"].to(device)
+        mask = batch["mask"].to(device)
+        pred = gen(cond).clamp(-1, 1)
+        if pred.shape != target.shape:
+            pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
+        per_batch.append(eval_metrics(pred, target, mask))
+        for i in range(pred.size(0)):
+            rr = roi_p75(target[i:i+1], mask[i:i+1]); pp = roi_p75(pred[i:i+1], mask[i:i+1])
+            if rr is not None and pp is not None:
+                p75_real.append(rr); p75_pred.append(pp)
+        if first is None:
+            first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), batch["id"][0])
+    metrics = aggregate(per_batch)
+    pc = pearson(p75_real, p75_pred)
+    if pc is not None:
+        metrics["p75_corr"] = pc
+    log.info(f"VAL metrics: {json.dumps({k: round(v, 4) for k, v in metrics.items()})}")
+    if first is not None:
+        cond, target, pred, mask, cid = first
+        log.info(f"in-distribution sample [{cid}] (val)")
+        save_samples(Path(args.output_dir) / "samples", cond, target, pred, mask,
+                     "indist_" + cid, montage_name=montage_name)
+    return metrics
 
 
 def save_samples(out_dir: Path, cond, target, pred, mask, case_id, montage_name="montage"):
