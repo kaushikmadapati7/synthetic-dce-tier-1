@@ -267,6 +267,16 @@ def parse_args():
                    help="flow trajectory-anchoring weight (FlowMI-style): decode the predicted "
                         "clean latent and add an image-space ROI recon loss; 0=off. Gives the "
                         "flow LDM the direct prostate supervision the GAN has. Try 0.5-2.0")
+    p.add_argument("--flow-adv-weight", type=float, default=0.0,
+                   help="flow adversarial head: conditional patch-disc on the decoded "
+                        "one-shot prediction (0=off; try 0.1). Forces faithful/localized "
+                        "texture vs the pure-velocity flow's hallucinated texture")
+    p.add_argument("--flow-feat-weight", type=float, default=1.0,
+                   help="feature-matching weight for the flow adversarial head (stabilizes)")
+    p.add_argument("--flow-adv-warmup", type=int, default=10,
+                   help="epochs of pure flow before the adversarial term starts")
+    p.add_argument("--flow-adv-t", type=float, default=0.5,
+                   help="noise level t at which the adversarial fake (decoded x0_hat) is drawn")
     p.add_argument("--anchor-t-max", type=float, default=1.0,
                    help="only apply the anchor for t < this (1.0 = all t). The clean-latent "
                         "estimate is noisy at high t; 0.5 restricts it to the reliable low-noise regime")

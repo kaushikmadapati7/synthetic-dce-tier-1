@@ -12,7 +12,8 @@ from pathlib import Path
 import torch
 
 from ..models import (AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching,
-                      PatchDiscriminator3D, d_hinge_loss)
+                      PatchDiscriminator3D, CondPatchDiscriminator3D,
+                      d_hinge_loss, feature_matching_loss)
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
                     val_score, save_best, best_or_last_ckpt, prep_cond, EMA)
 
@@ -169,11 +170,27 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
 
     opt = torch.optim.Adam(ldm.unet.parameters(), lr=args.lr)
     ema = EMA(ldm.unet, args.ema_decay) if getattr(args, "ema_decay", 0.0) > 0 else None
+
+    # optional adversarial head on the flow's decoded one-shot prediction: a
+    # conditional patch-discriminator + feature matching forces the generated
+    # texture to be FAITHFUL (well-localized) rather than plausible-but-hallucinated
+    # -- the ClinDCE flow+GAN ingredient our pure-velocity flow lacks.
+    flow_adv = flow and getattr(args, "flow_adv_weight", 0.0) > 0
+    disc = opt_d = None
+    if flow_adv:
+        disc = CondPatchDiscriminator3D(in_channels=1 + _cond_channels(args),
+                                        base_ch=args.base_ch).to(device)
+        opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
+        log.info(f"flow adversarial: cond patch-disc on, adv_w={args.flow_adv_weight} "
+                 f"feat_w={getattr(args, 'flow_feat_weight', 1.0)} "
+                 f"warmup={getattr(args, 'flow_adv_warmup', 10)} t={getattr(args, 'flow_adv_t', 0.5)}")
+
     gen = _ldm_gen(ldm, args, lat_spatial, device, flow)
     val_every = args.val_every or args.ckpt_every
     best = float("-inf")
     for epoch in range(args.epochs):
         ldm.unet.train(); t0 = time.time(); agg = {}
+        adv_on = flow_adv and epoch >= getattr(args, "flow_adv_warmup", 10)
         for batch in train_loader:
             cond = prep_cond(batch["cond"].to(device), args, training=True)  # Layer-1 dropout
             mask = batch["mask"].to(device)
@@ -188,6 +205,24 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                                  anchor_criterion=criterion, anchor_weight=args.anchor_weight,
                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
             loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight, **anchor_kw)
+
+            if adv_on:
+                fake_img = ldm.predict_image(z0, cond=cond_ds, t_val=getattr(args, "flow_adv_t", 0.5))
+                # discriminator step: real DCE vs detached fake, conditioned on bpMRI
+                d_loss = d_hinge_loss(disc(target_img, cond)[0], disc(fake_img.detach(), cond)[0])
+                opt_d.zero_grad(); d_loss.backward(); opt_d.step()
+                # generator adversarial + feature matching (real feats are fixed targets)
+                fake_logits, fake_feats = disc(fake_img, cond)
+                with torch.no_grad():
+                    _, real_feats = disc(target_img, cond)
+                g_adv = -fake_logits.mean()
+                feat = feature_matching_loss(real_feats, fake_feats)
+                loss = loss + args.flow_adv_weight * g_adv \
+                    + getattr(args, "flow_feat_weight", 1.0) * feat
+                for k, v in {"d": float(d_loss.detach()), "g_adv": float(g_adv.detach()),
+                             "feat": float(feat.detach())}.items():
+                    agg[k] = agg.get(k, 0.0) + v
+
             opt.zero_grad(); loss.backward(); opt.step()
             if ema: ema.update(ldm.unet)
             agg["diff"] = agg.get("diff", 0.0) + loss.item()

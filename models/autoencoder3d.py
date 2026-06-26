@@ -106,6 +106,45 @@ class PatchDiscriminator3D(nn.Module):
         return self.net(x)
 
 
+class CondPatchDiscriminator3D(nn.Module):
+    """Conditional 3D PatchGAN: scores a DCE volume against its bpMRI conditioning
+    (concatenated as extra input channels) and returns per-patch logits *plus* the
+    intermediate feature maps for a feature-matching loss. Used to give the flow
+    LDM a direct adversarial signal on its decoded one-shot prediction -- the
+    ingredient that turns plausible-but-hallucinated texture into faithful,
+    spatially-localized enhancement (ClinDCE's flow+GAN recipe)."""
+
+    def __init__(self, in_channels: int = 4, base_ch: int = 32, n_layers: int = 3):
+        super().__init__()
+        blocks = [nn.Sequential(nn.Conv3d(in_channels, base_ch, 4, 2, 1),
+                                nn.LeakyReLU(0.2, True))]
+        ch = base_ch
+        for i in range(1, n_layers):
+            nch = min(base_ch * 2 ** i, 256)
+            blocks.append(nn.Sequential(nn.Conv3d(ch, nch, 4, 2, 1),
+                                        nn.GroupNorm(min(8, nch), nch),
+                                        nn.LeakyReLU(0.2, True)))
+            ch = nch
+        self.blocks = nn.ModuleList(blocks)
+        self.head = nn.Conv3d(ch, 1, 4, 1, 1)
+
+    def forward(self, dce, cond):
+        h = torch.cat([dce, cond], dim=1)
+        feats = []
+        for blk in self.blocks:
+            h = blk(h)
+            feats.append(h)
+        return self.head(h), feats
+
+
+def feature_matching_loss(real_feats, fake_feats):
+    """Mean L1 between discriminator feature maps of real vs generated samples.
+    Stabilizes adversarial training and pulls generated texture toward the real
+    feature statistics. ``real_feats`` are treated as fixed targets."""
+    return sum(F.l1_loss(f, r.detach()) for r, f in zip(real_feats, fake_feats)) \
+        / max(1, len(real_feats))
+
+
 class AutoencoderKL3D(nn.Module):
     def __init__(
         self,

@@ -76,6 +76,23 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
                 loss = loss + anchor_weight * anchor_criterion(img, anchor_image[lo], anchor_mask[lo])[0]
         return loss
 
+    def predict_image(self, z0, cond=None, labels=None, t_val=0.5):
+        """Decode the model's one-shot clean-image prediction x0_hat at a fixed
+        noise level ``t_val`` (grad-enabled) -- for an adversarial / feature-
+        matching head on the flow. With v = noise - (1-sigma_min)*z0, the identity
+        z0_hat = z_t - t*v holds *exactly* for any sigma_min, so with the predicted
+        v this is the network's implied clean sample. ``cond`` is the latent-grid
+        conditioning (same as fed to ``loss``)."""
+        b = z0.shape[0]
+        t = torch.full((b,), t_val, device=z0.device)
+        tb = t.view(b, *([1] * (z0.dim() - 1)))
+        noise = torch.randn_like(z0)
+        zt = (1.0 - (1.0 - self.sigma_min) * tb) * z0 + tb * noise
+        pred = self.unet(zt, t * self.time_scale, cond=cond, labels=labels)
+        z0_hat = zt - tb * pred
+        return self.autoencoder.decoder(z0_hat / self.autoencoder.scaling_factor
+                                        + self.autoencoder.latent_shift)
+
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()
     def sample(self, shape, device, steps=50, cond=None, labels=None,
