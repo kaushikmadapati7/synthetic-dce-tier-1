@@ -45,10 +45,18 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
 
     # ---- training ----
     def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0,
+             source=None,
              anchor_image=None, anchor_mask=None, anchor_criterion=None, anchor_weight=0.0,
              anchor_t_max=1.0):
-        """z0: clean latent. t=0 -> data, t=1 -> noise. ``mask`` (latent-grid
-        prostate mask) + roi_weight give the latent objective ROI emphasis.
+        """z0: clean latent. t=0 -> data, t=1 -> the ``source`` endpoint. ``mask``
+        (latent-grid prostate mask) + roi_weight give the latent objective ROI
+        emphasis.
+
+        ``source`` (image-to-image / rectified flow): when given (e.g. the encoded
+        T2w latent), the path runs DCE <-> T2w instead of DCE <-> noise, so the
+        model learns only the enhancement *residual* from registered anatomy that
+        is already in place -- a structural prior aimed at the localization ceiling.
+        Defaults to N(0,1) noise (the standard noise->data flow).
 
         Trajectory anchoring (adapted from FlowMI for a noise->data flow): when
         anchor_weight>0, decode the predicted CLEAN latent z0_hat = z_t - t*v and
@@ -58,7 +66,7 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         decoder, which is why the LDM blurs."""
         b = z0.shape[0]
         t = torch.rand(b, device=z0.device)
-        noise = torch.randn_like(z0)
+        noise = source if source is not None else torch.randn_like(z0)
         tb = t.view(b, *([1] * (z0.dim() - 1)))
 
         zt = (1.0 - (1.0 - self.sigma_min) * tb) * z0 + tb * noise
@@ -96,8 +104,10 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()
     def sample(self, shape, device, steps=50, cond=None, labels=None,
-               solver="heun", decode=True, guidance_scale=1.0):
-        z = torch.randn(shape, device=device)
+               solver="heun", decode=True, guidance_scale=1.0, source=None):
+        # start the ODE from the source latent (e.g. encoded T2w) when given,
+        # otherwise from noise -- must match how the model was trained
+        z = source if source is not None else torch.randn(shape, device=device)
         ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
         for i in range(steps):
             t, t_next = ts[i], ts[i + 1]

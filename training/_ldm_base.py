@@ -67,13 +67,16 @@ def _set_scaling_factor(vae, train_loader, device, center=False):
 
 def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
     w = getattr(args, "guidance_scale", 1.0)
+    src_t2w = flow and getattr(args, "flow_source", "noise") == "t2w"
     def gen(cond):
+        # image-to-image flow: start the ODE from the encoded T2w (cond channel 0)
+        source = ldm.encode(cond[:, 0:1]) if src_t2w else None
         cond = prep_cond(cond, args, training=False)   # Layer-1: fixed --eval-modalities subset
         cond_ds = downsample_cond(cond, lat_spatial)
         shape = (cond.size(0), args.latent_channels, *lat_spatial)
         if flow:
             return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds,
-                              guidance_scale=w)
+                              guidance_scale=w, source=source)
         return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds,
                                x0_clamp=getattr(args, "x0_clamp", 3.0), guidance_scale=w)
     return gen
@@ -114,12 +117,19 @@ def train_vae(args, train_loader, criterion, device):
             disc = PatchDiscriminator3D(in_channels=1, base_ch=args.base_ch).to(device)
             opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
             log.info(f"VAE adversarial: patch-disc on, weight={adv_w}, warmup={warmup} epochs")
+        joint = getattr(args, "vae_joint", False)   # train on DCE + T2w so encode(T2w)
+        if joint:                                    # is well-defined for an i2i flow source
+            log.info("VAE joint mode: reconstructing DCE + T2w (sound encode(T2w) for --flow-source t2w)")
         for epoch in range(args.vae_epochs):
             vae.train(); t0 = time.time(); agg = {}
             adv_on = disc is not None and epoch >= warmup
             for batch in train_loader:
                 x = batch["target"].to(device)
                 mask = batch["mask"].to(device)
+                if joint:                            # stack T2w (cond ch0) as extra samples
+                    t2w = batch["cond"][:, 0:1].to(device)
+                    x = torch.cat([x, t2w], dim=0)
+                    mask = torch.cat([mask, mask], dim=0)
                 recon, posterior = vae(x)
                 rec, parts = criterion(recon, x, mask)
                 loss = rec + args.kl_weight * posterior.kl()
@@ -191,12 +201,16 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     for epoch in range(args.epochs):
         ldm.unet.train(); t0 = time.time(); agg = {}
         adv_on = flow_adv and epoch >= getattr(args, "flow_adv_warmup", 10)
+        src_t2w = flow and getattr(args, "flow_source", "noise") == "t2w"
         for batch in train_loader:
-            cond = prep_cond(batch["cond"].to(device), args, training=True)  # Layer-1 dropout
+            cond_raw = batch["cond"].to(device)
+            cond = prep_cond(cond_raw, args, training=True)       # Layer-1 dropout
             mask = batch["mask"].to(device)
             target_img = batch["target"].to(device)
             with torch.no_grad():
                 z0 = ldm.encode(target_img)
+                # image-to-image flow: source endpoint = encoded T2w (cond channel 0)
+                source = ldm.encode(cond_raw[:, 0:1]) if src_t2w else None
             cond_ds = downsample_cond(cond, z0.shape[2:])
             mask_ds = downsample_cond(mask, z0.shape[2:])          # prostate mask -> latent grid
             anchor_kw = {}
@@ -204,7 +218,8 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                 anchor_kw = dict(anchor_image=target_img, anchor_mask=mask,
                                  anchor_criterion=criterion, anchor_weight=args.anchor_weight,
                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
-            loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight, **anchor_kw)
+            loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight,
+                            source=source, **anchor_kw)
 
             if adv_on:
                 fake_img = ldm.predict_image(z0, cond=cond_ds, t_val=getattr(args, "flow_adv_t", 0.5))

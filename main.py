@@ -267,6 +267,12 @@ def parse_args():
                    help="flow trajectory-anchoring weight (FlowMI-style): decode the predicted "
                         "clean latent and add an image-space ROI recon loss; 0=off. Gives the "
                         "flow LDM the direct prostate supervision the GAN has. Try 0.5-2.0")
+    p.add_argument("--flow-source", choices=["noise", "t2w"], default="noise",
+                   help="flow ODE start: 'noise' (standard) or 't2w' (image-to-image: start "
+                        "from the encoded T2w so the model learns only the enhancement residual)")
+    p.add_argument("--vae-joint", action="store_true", default=False,
+                   help="train the VAE on DCE + T2w jointly so encode(T2w) is well-defined "
+                        "(the sound first stage for --flow-source t2w)")
     p.add_argument("--flow-adv-weight", type=float, default=0.0,
                    help="flow adversarial head: conditional patch-disc on the decoded "
                         "one-shot prediction (0=off; try 0.1). Forces faithful/localized "

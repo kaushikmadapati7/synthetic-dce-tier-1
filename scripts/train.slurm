@@ -60,6 +60,8 @@ VAE_ADV_WEIGHT=${VAE_ADV_WEIGHT:-0.0}          # VAE patch-discriminator weight 
 VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adversarial term starts
 ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # flow trajectory-anchoring (FlowMI-style image-space recon); 0=off, try 0.5-2.0
 ANCHOR_T_MAX=${ANCHOR_T_MAX:-1.0}             # only anchor for t<this (1.0=all; 0.5=reliable low-noise regime)
+FLOW_SOURCE=${FLOW_SOURCE:-noise}             # flow ODE start: noise | t2w (image-to-image structural prior)
+VAE_JOINT=${VAE_JOINT:-0}                      # 1 = train VAE on DCE+T2w (sound encode(T2w) for FLOW_SOURCE=t2w)
 FLOW_ADV_WEIGHT=${FLOW_ADV_WEIGHT:-0.0}       # flow adversarial head (cond patch-disc on decoded pred); 0=off, try 0.1
 FLOW_FEAT_WEIGHT=${FLOW_FEAT_WEIGHT:-1.0}     # feature-matching weight for the flow adversarial head
 FLOW_ADV_WARMUP=${FLOW_ADV_WARMUP:-10}        # epochs of pure flow before adversarial term starts
@@ -148,6 +150,7 @@ ARGS=(
   --vae-adv-warmup "${VAE_ADV_WARMUP}"
   --anchor-weight "${ANCHOR_WEIGHT}"
   --anchor-t-max "${ANCHOR_T_MAX}"
+  --flow-source "${FLOW_SOURCE}"
   --flow-adv-weight "${FLOW_ADV_WEIGHT}"
   --flow-feat-weight "${FLOW_FEAT_WEIGHT}"
   --flow-adv-warmup "${FLOW_ADV_WARMUP}"
@@ -178,6 +181,7 @@ if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
 if [ "${EVAL_ONLY}" = "1" ]; then ARGS+=(--eval-only); fi
 if [ "${LATENT_CENTER}" = "1" ]; then ARGS+=(--latent-center); fi
 if [ "${MODALITY_DROPOUT}" = "1" ]; then ARGS+=(--modality-dropout); fi
+if [ "${VAE_JOINT}" = "1" ]; then ARGS+=(--vae-joint); fi
 if [ -n "${VAE_CKPT}" ]; then ARGS+=(--vae-ckpt "${VAE_CKPT}"); fi
 if [ -n "${EXTRA_ARGS}" ]; then ARGS+=(${EXTRA_ARGS}); fi
 
