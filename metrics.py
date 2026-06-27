@@ -49,9 +49,13 @@ def roi_radiomics(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     pc, tc = p - p.mean(), t - t.mean()
     denom = (pc.norm() * tc.norm()).clamp(min=1e-8)
     w1 = (p.sort().values - t.sort().values).abs().mean() / 2.0   # /2: [-1,1] span -> [0,1]
+    # var_ratio is a ratio with a small denominator -> a near-flat target ROI
+    # (low-enhancement case) blows it up and wrecks the mean. Cap per-case at 5
+    # so "much too noisy" reads ~5 instead of thousands; aggregate stays robust.
+    var_ratio = min(float(p.var(unbiased=False) / (t.var(unbiased=False) + 1e-6)), 5.0)
     return {
         "roi_pearson": float((pc * tc).sum() / denom),
-        "roi_var_ratio": float(p.var(unbiased=False) / (t.var(unbiased=False) + 1e-8)),
+        "roi_var_ratio": var_ratio,
         "roi_p75_err": float((p.quantile(0.75) - t.quantile(0.75)).abs()),
         "roi_w1": float(w1),
     }
