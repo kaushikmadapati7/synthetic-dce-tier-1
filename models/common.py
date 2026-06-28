@@ -76,6 +76,53 @@ class AttentionBlock3D(nn.Module):
         return x + self.proj(out)
 
 
+class CondEncoder3D(nn.Module):
+    """Encode the raw bpMRI conditioning volume into a compact token grid
+    (downsampled to ~the U-Net bottleneck resolution) for cross-attention to
+    attend to. Keeps the key/value token count small so cross-attn is cheap."""
+
+    def __init__(self, cond_channels: int, cond_dim: int, n_down: int):
+        super().__init__()
+        layers = [nn.Conv3d(cond_channels, cond_dim, 3, padding=1), nn.SiLU()]
+        for _ in range(n_down):
+            layers += [nn.Conv3d(cond_dim, cond_dim, 3, stride=2, padding=1), nn.SiLU()]
+        self.net = nn.Sequential(*layers)
+        self.res = ResBlock3D(cond_dim, cond_dim)
+
+    def forward(self, cond: torch.Tensor) -> torch.Tensor:
+        return self.res(self.net(cond))
+
+
+class CrossAttentionBlock3D(nn.Module):
+    """U-Net spatial features (queries) attend to encoded conditioning tokens
+    (keys/values). Injects the bpMRI conditioning at every attention scale rather
+    than only concatenating it once at the input -- aimed at the localization
+    ceiling. Query and key/value token counts need not match."""
+
+    def __init__(self, ch: int, cond_dim: int, heads: int = 4, groups: int = 8):
+        super().__init__()
+        self.heads = heads
+        self.norm = nn.GroupNorm(min(groups, ch), ch)
+        self.to_q = nn.Conv3d(ch, ch, 1)
+        self.to_kv = nn.Conv3d(cond_dim, ch * 2, 1)
+        self.proj = nn.Conv3d(ch, ch, 1)
+        nn.init.zeros_(self.proj.weight); nn.init.zeros_(self.proj.bias)  # start as identity
+
+    def forward(self, x: torch.Tensor, cond_feat: torch.Tensor | None) -> torch.Tensor:
+        if cond_feat is None:
+            return x
+        b, c, d, h, w = x.shape
+        dh = c // self.heads
+        q = self.to_q(self.norm(x)).reshape(b, self.heads, dh, d * h * w)
+        kv = self.to_kv(cond_feat)
+        nkv = kv.shape[2] * kv.shape[3] * kv.shape[4]
+        k, v = kv.reshape(b, 2, self.heads, dh, nkv).unbind(1)
+        q, k, v = (t.transpose(-1, -2).contiguous() for t in (q, k, v))  # (b,heads,N,dh)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(-1, -2).reshape(b, c, d, h, w)
+        return x + self.proj(out)
+
+
 class Downsample3D(nn.Module):
     def __init__(self, ch: int):
         super().__init__()

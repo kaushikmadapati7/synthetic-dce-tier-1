@@ -60,6 +60,7 @@ VAE_ADV_WEIGHT=${VAE_ADV_WEIGHT:-0.0}          # VAE patch-discriminator weight 
 VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adversarial term starts
 ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # flow trajectory-anchoring (FlowMI-style image-space recon); 0=off, try 0.5-2.0
 ANCHOR_T_MAX=${ANCHOR_T_MAX:-1.0}             # only anchor for t<this (1.0=all; 0.5=reliable low-noise regime)
+COND_DIM=${COND_DIM:-0}                        # cross-attention conditioning token channels (0=off, concat-only; try 64/128)
 FLOW_SOURCE=${FLOW_SOURCE:-noise}             # flow ODE start: noise | t2w (image-to-image structural prior)
 VAE_JOINT=${VAE_JOINT:-0}                      # 1 = train VAE on DCE+T2w (sound encode(T2w) for FLOW_SOURCE=t2w)
 FLOW_ADV_WEIGHT=${FLOW_ADV_WEIGHT:-0.0}       # flow adversarial head (cond patch-disc on decoded pred); 0=off, try 0.1
@@ -150,6 +151,7 @@ ARGS=(
   --vae-adv-warmup "${VAE_ADV_WARMUP}"
   --anchor-weight "${ANCHOR_WEIGHT}"
   --anchor-t-max "${ANCHOR_T_MAX}"
+  --cond-dim "${COND_DIM}"
   --flow-source "${FLOW_SOURCE}"
   --flow-adv-weight "${FLOW_ADV_WEIGHT}"
   --flow-feat-weight "${FLOW_FEAT_WEIGHT}"

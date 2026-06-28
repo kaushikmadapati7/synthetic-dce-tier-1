@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .common import (ResBlock3D, AttentionBlock3D, Downsample3D, Upsample3D,
-                     TimeEmbedding)
+from .common import (ResBlock3D, AttentionBlock3D, CrossAttentionBlock3D,
+                     CondEncoder3D, Downsample3D, Upsample3D, TimeEmbedding)
 
 
 class UNet3D(nn.Module):
@@ -28,6 +28,7 @@ class UNet3D(nn.Module):
         ch_mults: tuple = (1, 2, 4),
         num_res_blocks: int = 2,
         attn_resolutions: tuple = (1, 2),
+        cond_dim: int = 0,
     ):
         super().__init__()
         emb_dim = base_ch * 4
@@ -36,7 +37,17 @@ class UNet3D(nn.Module):
             self.class_emb = nn.Embedding(num_classes, emb_dim)
         self.num_classes = num_classes
 
+        # cross-attention conditioning: encode cond to coarse tokens that the
+        # attention blocks attend to (in ADDITION to the input concat). cond_dim>0 on.
+        self.cond_encoder = (CondEncoder3D(cond_channels, cond_dim, n_down=len(ch_mults) - 1)
+                             if cond_dim > 0 and cond_channels > 0 else None)
         self.conv_in = nn.Conv3d(in_channels + cond_channels, base_ch, 3, padding=1)
+
+        def _attn(c):
+            blocks = [AttentionBlock3D(c)]
+            if self.cond_encoder is not None:
+                blocks.append(CrossAttentionBlock3D(c, cond_dim))
+            return blocks
 
         chans = [base_ch * m for m in ch_mults]
         # ---- encoder ----
@@ -48,7 +59,7 @@ class UNet3D(nn.Module):
                 stage = nn.ModuleList([ResBlock3D(ch, out_ch, emb_dim)])
                 ch = out_ch
                 if i in attn_resolutions:
-                    stage.append(AttentionBlock3D(ch))
+                    stage.extend(_attn(ch))
                 self.down.append(stage)
                 skip_chs.append(ch)
             if i < len(chans) - 1:
@@ -56,8 +67,7 @@ class UNet3D(nn.Module):
                 skip_chs.append(ch)
 
         # ---- middle ----
-        self.mid = nn.ModuleList([ResBlock3D(ch, ch, emb_dim),
-                                  AttentionBlock3D(ch),
+        self.mid = nn.ModuleList([ResBlock3D(ch, ch, emb_dim), *_attn(ch),
                                   ResBlock3D(ch, ch, emb_dim)])
 
         # ---- decoder ----
@@ -67,7 +77,7 @@ class UNet3D(nn.Module):
                 stage = nn.ModuleList([ResBlock3D(ch + skip_chs.pop(), out_ch, emb_dim)])
                 ch = out_ch
                 if i in attn_resolutions:
-                    stage.append(AttentionBlock3D(ch))
+                    stage.extend(_attn(ch))
                 self.up.append(stage)
             if i > 0:
                 self.up.append(nn.ModuleList([Upsample3D(ch)]))
@@ -80,24 +90,32 @@ class UNet3D(nn.Module):
         if self.num_classes > 0 and labels is not None:
             emb = emb + self.class_emb(labels)
 
+        # encode cond tokens for cross-attention BEFORE it gets concatenated in
+        cond_feat = self.cond_encoder(cond) if (self.cond_encoder is not None and cond is not None) else None
         if cond is not None:
             x = torch.cat([x, cond], dim=1)
         h = self.conv_in(x)
 
+        def run(layer, h):
+            if isinstance(layer, ResBlock3D):
+                return layer(h, emb)
+            if isinstance(layer, CrossAttentionBlock3D):
+                return layer(h, cond_feat)
+            return layer(h)
+
         skips = [h]
         for stage in self.down:
             for layer in stage:
-                h = layer(h, emb) if isinstance(layer, ResBlock3D) else layer(h)
+                h = run(layer, h)
             skips.append(h)
 
         for layer in self.mid:
-            h = layer(h, emb) if isinstance(layer, ResBlock3D) else layer(h)
+            h = run(layer, h)
 
         for stage in self.up:
-            first = stage[0]
-            if isinstance(first, ResBlock3D):
+            if isinstance(stage[0], ResBlock3D):
                 h = torch.cat([h, skips.pop()], dim=1)
             for layer in stage:
-                h = layer(h, emb) if isinstance(layer, ResBlock3D) else layer(h)
+                h = run(layer, h)
 
         return self.conv_out(F.silu(self.norm_out(h)))

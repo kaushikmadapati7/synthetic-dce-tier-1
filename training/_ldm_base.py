@@ -33,7 +33,8 @@ def _build_ldm(args, device, flow: bool):
                           ch_mults=tuple(args.ch_mults)).to(device)
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
                        cond_channels=_cond_channels(args), base_ch=args.base_ch,
-                       ch_mults=tuple(args.unet_ch_mults))
+                       ch_mults=tuple(args.unet_ch_mults),
+                       cond_dim=getattr(args, "cond_dim", 0))
     cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
         ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=unet_kwargs,
@@ -165,7 +166,8 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
 
     unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
                        cond_channels=_cond_channels(args), base_ch=args.base_ch,
-                       ch_mults=tuple(args.unet_ch_mults))
+                       ch_mults=tuple(args.unet_ch_mults),
+                       cond_dim=getattr(args, "cond_dim", 0))
     name = "ldm_flow" if flow else "ldm_ddpm"
     cfg_dropout = getattr(args, "cfg_dropout", 0.0)
     if flow:
