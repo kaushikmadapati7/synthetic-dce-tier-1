@@ -105,7 +105,8 @@ def make_criterion(args, device) -> CustomLoss:
 # data
 # ---------------------------------------------------------------------------
 def build_data(args):
-    cfg = PreprocessConfig(reference=args.reference, spatial_size=tuple(args.spatial_size))
+    cfg = PreprocessConfig(reference=args.reference, spatial_size=tuple(args.spatial_size),
+                           tz_weight=args.tz_weight, pz_weight=args.pz_weight)
     out = Path(args.output_dir)
     layout = dict(image_subdir=args.image_subdir, mask_subdir=args.mask_subdir)
     test_hospitals = args.test_hospitals
@@ -267,6 +268,11 @@ def parse_args():
                    help="flow trajectory-anchoring weight (FlowMI-style): decode the predicted "
                         "clean latent and add an image-space ROI recon loss; 0=off. Gives the "
                         "flow LDM the direct prostate supervision the GAN has. Try 0.5-2.0")
+    p.add_argument("--pz-weight", type=float, default=1.0,
+                   help="zone-aware loss: extra multiplier on peripheral-zone (PZ) voxels where "
+                        "DCE is clinically read (1.0=off; try 2.0-3.0). Needs prostate_zones masks")
+    p.add_argument("--tz-weight", type=float, default=1.0,
+                   help="zone-aware loss: multiplier on transition-zone (TZ) voxels (1.0=off)")
     p.add_argument("--cond-dim", type=int, default=0,
                    help="cross-attention conditioning: encode bpMRI cond to this-many token "
                         "channels that the UNet attention blocks attend to (0=off, concat-only; "

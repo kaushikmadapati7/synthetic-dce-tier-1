@@ -99,6 +99,18 @@ def _silver_mask(mask_root: Path, hosp: str, subject: str):
     return None
 
 
+def _silver_zones(mask_root: Path, hosp: str, subject: str):
+    """Locate the PZ/TZ zonal segmentation in the parallel Prostate_masks tree."""
+    d = mask_root / hosp / subject
+    if not d.is_dir():
+        return None
+    for name in ("prostate_zones.nii.gz", "prostate_zones.nii"):
+        p = d / name
+        if p.exists():
+            return p
+    return None
+
+
 def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
     cond = np.stack([arrays[k] for k in INPUT_KEYS], axis=0)
     target = arrays[DCE_KEY][None]
@@ -106,10 +118,13 @@ def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
         mask = arrays["mask"][None]
     else:
         mask = np.zeros_like(target)
+    # zone_weight defaults to all-ones (no zone effect) when zones are unavailable
+    zw = arrays["zone_weight"][None] if "zone_weight" in arrays else np.ones_like(target)
     return {
         "cond": torch.from_numpy(cond).float(),
         "target": torch.from_numpy(target).float(),
         "mask": torch.from_numpy(mask).float(),
+        "zone_weight": torch.from_numpy(zw).float(),
         "id": case_id,
     }
 
@@ -141,7 +156,8 @@ class CanonicalDCEDataset(Dataset):
                     skipped += 1
                     continue
                 mask = _silver_mask(self.mask_root, hosp, subj.name) or _find_mask(subj)
-                self.samples.append((f"{hosp}/{subj.name}", paths, mask))
+                zones = _silver_zones(self.mask_root, hosp, subj.name)
+                self.samples.append((f"{hosp}/{subj.name}", paths, mask, zones))
                 found += 1
             if found == 0:
                 log.warning(f"[canonical] {hosp}: 0 usable subjects under {hosp_dir} "
@@ -153,20 +169,21 @@ class CanonicalDCEDataset(Dataset):
         return len(self.samples)
 
     def _load_images(self, i):
-        case_id, paths, mask_path = self.samples[i]
+        case_id, paths, mask_path, zones_path = self.samples[i]
         images = {k: load_sitk(p) for k, p in paths.items()}
         mask = load_sitk(mask_path) if mask_path else None
-        return case_id, images, mask
+        zones = load_sitk(zones_path) if zones_path else None
+        return case_id, images, mask, zones
 
     def __getitem__(self, i):
-        case_id, images, mask = self._load_images(i)
-        arrays = process_case(images, self.cfg, mask, self.harmonizer)
+        case_id, images, mask, zones = self._load_images(i)
+        arrays = process_case(images, self.cfg, mask, self.harmonizer, zones=zones)
         return _stack_sample(arrays, case_id, self.cfg.spatial_size)
 
     def raw_modalities(self, i) -> dict:
         """Un-normalized resampled arrays per modality (for fitting a harmonizer)."""
-        _, images, mask = self._load_images(i)
-        raw, _ = resample_case(images, self.cfg, mask)
+        _, images, mask, _ = self._load_images(i)
+        raw, _, _ = resample_case(images, self.cfg, mask)
         return raw
 
 
@@ -240,13 +257,15 @@ class DescriptorDCEDataset(Dataset):
 
         mask_path = _silver_mask(self.mask_root, hosp, subj.name) or _find_mask(subj)
         mask_img = load_sitk(mask_path) if mask_path else None
+        zones_path = _silver_zones(self.mask_root, hosp, subj.name)
+        zones_img = load_sitk(zones_path) if zones_path else None
 
         phase_imgs = [load_sitk(p) for p in phase_files]
         idx = self._select_phase(phase_imgs, mask_img)
 
         images = {k: load_sitk(v) for k, v in inputs.items()}
         images[DCE_KEY] = phase_imgs[idx]
-        return case_id, images, mask_img
+        return case_id, images, mask_img, zones_img
 
     def _select_phase(self, phase_imgs, mask_img) -> int:
         sel = self.phase_select
@@ -257,14 +276,14 @@ class DescriptorDCEDataset(Dataset):
         return max(0, min(int(sel), len(phase_imgs) - 1))
 
     def __getitem__(self, i):
-        case_id, images, mask_img = self._load_images(i)
-        arrays = process_case(images, self.cfg, mask_img, self.harmonizer)
+        case_id, images, mask_img, zones_img = self._load_images(i)
+        arrays = process_case(images, self.cfg, mask_img, self.harmonizer, zones=zones_img)
         return _stack_sample(arrays, case_id, self.cfg.spatial_size)
 
     def raw_modalities(self, i) -> dict:
         """Un-normalized resampled arrays per modality (for fitting a harmonizer)."""
-        _, images, mask_img = self._load_images(i)
-        raw, _ = resample_case(images, self.cfg, mask_img)
+        _, images, mask_img, _ = self._load_images(i)
+        raw, _, _ = resample_case(images, self.cfg, mask_img)
         return raw
 
 

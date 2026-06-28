@@ -46,8 +46,8 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
     # ---- training ----
     def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0,
              source=None,
-             anchor_image=None, anchor_mask=None, anchor_criterion=None, anchor_weight=0.0,
-             anchor_t_max=1.0):
+             anchor_image=None, anchor_mask=None, anchor_zone_weight=None,
+             anchor_criterion=None, anchor_weight=0.0, anchor_t_max=1.0):
         """z0: clean latent. t=0 -> data, t=1 -> the ``source`` endpoint. ``mask``
         (latent-grid prostate mask) + roi_weight give the latent objective ROI
         emphasis.
@@ -81,7 +81,9 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
                 z0_hat = zt[lo] - tb[lo] * pred[lo]       # predicted clean latent (holds for any sigma_min)
                 img = self.autoencoder.decoder(z0_hat / self.autoencoder.scaling_factor
                                                + self.autoencoder.latent_shift)  # grad-enabled decode
-                loss = loss + anchor_weight * anchor_criterion(img, anchor_image[lo], anchor_mask[lo])[0]
+                zw = anchor_zone_weight[lo] if anchor_zone_weight is not None else None
+                loss = loss + anchor_weight * anchor_criterion(
+                    img, anchor_image[lo], anchor_mask[lo], zone_weight=zw)[0]
         return loss
 
     def predict_image(self, z0, cond=None, labels=None, t_val=0.5):

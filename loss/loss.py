@@ -328,13 +328,18 @@ class CustomLoss(nn.Module):
         return mask is not None and self.roi_w > 1.0 and mask.sum() > 0
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                mask: torch.Tensor | None = None):
+                mask: torch.Tensor | None = None,
+                zone_weight: torch.Tensor | None = None):
         use_roi = self._has_roi(mask)
         has_mask = mask is not None and mask.sum() > 0
 
-        # L1: reweighted so ROI voxels dominate the gradient (also lifts ROI PSNR)
+        # L1: reweighted so ROI voxels dominate the gradient (also lifts ROI PSNR).
+        # zone_weight (PZ/TZ map, default all-ones) further emphasizes the PZ where
+        # DCE is clinically read -- a no-op when zones are absent or pz/tz weight=1.
         if use_roi:
             w = 1.0 + (self.roi_w - 1.0) * mask
+            if zone_weight is not None:
+                w = w * zone_weight
             l1 = (w * (pred - target).abs()).sum() / w.sum()
         else:
             l1 = F.l1_loss(pred, target)

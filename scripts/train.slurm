@@ -86,6 +86,8 @@ PERCEPTUAL=${PERCEPTUAL:-0.1}
 PERCEPTUAL_DEPTH=${PERCEPTUAL_DEPTH:-18}
 ADV_WEIGHT=${ADV_WEIGHT:-1.0}                  # GAN
 ROI_WEIGHT=${ROI_WEIGHT:-10.0}                 # prostate-ROI emphasis (1 = off)
+PZ_WEIGHT=${PZ_WEIGHT:-1.0}                     # zone-aware: extra weight on peripheral zone (DCE matters here); 1=off, try 2-3
+TZ_WEIGHT=${TZ_WEIGHT:-1.0}                     # zone-aware: weight on transition zone (1=off)
 RADIO_WEIGHT=${RADIO_WEIGHT:-0.0}              # ClinDCE regional-radiomics loss (0=off; try 0.1)
 FOCAL_WEIGHT=${FOCAL_WEIGHT:-0.0}              # ClinDCE focal-enhancement loss (0=off; try 0.1)
 EMA_DECAY=${EMA_DECAY:-0.999}                  # EMA of generator/UNet weights (0=off)
@@ -172,6 +174,8 @@ ARGS=(
   --medicalnet-weights "${MEDICALNET_WEIGHTS}"
   --adv-weight "${ADV_WEIGHT}"
   --roi-weight "${ROI_WEIGHT}"
+  --pz-weight "${PZ_WEIGHT}"
+  --tz-weight "${TZ_WEIGHT}"
   --radio-weight "${RADIO_WEIGHT}"
   --focal-weight "${FOCAL_WEIGHT}"
   --ema-decay "${EMA_DECAY}"

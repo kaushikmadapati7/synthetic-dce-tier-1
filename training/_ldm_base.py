@@ -127,12 +127,15 @@ def train_vae(args, train_loader, criterion, device):
             for batch in train_loader:
                 x = batch["target"].to(device)
                 mask = batch["mask"].to(device)
+                zw = batch["zone_weight"].to(device) if "zone_weight" in batch else None
                 if joint:                            # stack T2w (cond ch0) as extra samples
                     t2w = batch["cond"][:, 0:1].to(device)
                     x = torch.cat([x, t2w], dim=0)
                     mask = torch.cat([mask, mask], dim=0)
+                    if zw is not None:
+                        zw = torch.cat([zw, zw], dim=0)
                 recon, posterior = vae(x)
-                rec, parts = criterion(recon, x, mask)
+                rec, parts = criterion(recon, x, mask, zone_weight=zw)
                 loss = rec + args.kl_weight * posterior.kl()
                 parts = {**parts, "kl": posterior.kl().item()}
                 if adv_on:
@@ -213,11 +216,13 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                 z0 = ldm.encode(target_img)
                 # image-to-image flow: source endpoint = encoded T2w (cond channel 0)
                 source = ldm.encode(cond_raw[:, 0:1]) if src_t2w else None
+            zone_weight = batch["zone_weight"].to(device) if "zone_weight" in batch else None
             cond_ds = downsample_cond(cond, z0.shape[2:])
             mask_ds = downsample_cond(mask, z0.shape[2:])          # prostate mask -> latent grid
             anchor_kw = {}
             if flow and getattr(args, "anchor_weight", 0.0) > 0:  # FlowMI-style image-space anchoring
                 anchor_kw = dict(anchor_image=target_img, anchor_mask=mask,
+                                 anchor_zone_weight=zone_weight,
                                  anchor_criterion=criterion, anchor_weight=args.anchor_weight,
                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
             loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight,

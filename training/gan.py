@@ -58,6 +58,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
         for batch in train_loader:
             cond = batch["cond"].to(device); real = batch["target"].to(device)
             mask = batch["mask"].to(device)
+            zone_weight = batch["zone_weight"].to(device) if "zone_weight" in batch else None
             z = torch.randn(cond.size(0), args.z_dim, device=device)
 
             fake = gan.generator(z, cond_vol=cond)
@@ -67,7 +68,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
 
             g_loss, parts = g_total_loss(gan.discriminator(fake, cond_vol=cond),
                                          fake, real, criterion, adv_weight=args.adv_weight,
-                                         mask=mask)
+                                         mask=mask, zone_weight=zone_weight)
             opt_g.zero_grad(); g_loss.backward(); opt_g.step()
             if ema: ema.update(gan.generator)
 

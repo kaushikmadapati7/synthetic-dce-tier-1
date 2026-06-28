@@ -130,18 +130,19 @@ def g_hinge_loss(fake_logits):
     return -fake_logits.mean()
 
 
-def g_total_loss(fake_logits, fake, real, criterion=None, adv_weight=1.0, mask=None):
+def g_total_loss(fake_logits, fake, real, criterion=None, adv_weight=1.0, mask=None,
+                 zone_weight=None):
     """Generator objective: adversarial term + image-space reconstruction term.
 
-    criterion: optional callable(pred, target, mask=None) -> (loss, components),
-    e.g. loss.CustomLoss (perceptual + SSIM + L1, with optional ROI weighting).
-    When None, returns the plain adversarial (hinge) loss only.
+    criterion: optional callable(pred, target, mask=None, zone_weight=None) ->
+    (loss, components), e.g. loss.CustomLoss (perceptual + SSIM + L1, with optional
+    ROI / zone weighting). When None, returns the plain adversarial (hinge) loss.
     """
     adv = g_hinge_loss(fake_logits)
     parts = {"adv": adv.item()}
     rec = fake.new_zeros(())
     if criterion is not None:
-        rec, rec_parts = criterion(fake, real, mask)
+        rec, rec_parts = criterion(fake, real, mask, zone_weight=zone_weight)
         parts.update(rec_parts)
     total = adv_weight * adv + rec
     return total, parts

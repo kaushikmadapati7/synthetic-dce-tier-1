@@ -28,6 +28,11 @@ class PreprocessConfig:
     clip_percentiles: tuple = (0.5, 99.9)  # robust intensity window (99.9 upper preserves DCE peak; matches Nyul pc_high)
     adc_clip_value: float | None = 3000.0  # ADC is quantitative; hard clip instead of %iles
     pad_value: float = -1.0                # background after normalization to [-1, 1]
+    # zone-aware loss weighting (prostate_zones: 1=TZ, 2=PZ). The emitted
+    # 'zone_weight' map multiplies the ROI loss; DCE matters clinically in the PZ
+    # (PI-RADS), so pz_weight>1 emphasizes it. 1.0/1.0 = no zone effect (default).
+    tz_weight: float = 1.0
+    pz_weight: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -109,30 +114,35 @@ def build_reference(images: dict, cfg: PreprocessConfig) -> sitk.Image:
 
 
 def resample_case(images: dict, cfg: PreprocessConfig,
-                  mask: sitk.Image | None = None):
-    """Resample all modalities (and mask) onto the reference grid.
+                  mask: sitk.Image | None = None, zones: sitk.Image | None = None):
+    """Resample all modalities (and mask/zones) onto the reference grid.
 
-    Returns (raw_arrays, mask_arr) with intensities un-normalized and uncropped,
-    so the same arrays can be reused to fit a harmonizer.
+    Returns (raw_arrays, mask_arr, zones_arr) with intensities un-normalized and
+    uncropped, so the same arrays can be reused to fit a harmonizer.
     """
     ref = build_reference(images, cfg)
     raw = {name: to_array(resample_to_reference(img, ref, _INTENSITY_INTERP))
            for name, img in images.items()}
     mask_arr = (to_array(resample_to_reference(mask, ref, _LABEL_INTERP))
                 if mask is not None else None)
-    return raw, mask_arr
+    zones_arr = (to_array(resample_to_reference(zones, ref, _LABEL_INTERP))
+                 if zones is not None else None)
+    return raw, mask_arr, zones_arr
 
 
 def process_case(images: dict, cfg: PreprocessConfig,
-                 mask: sitk.Image | None = None, harmonizer=None) -> dict:
+                 mask: sitk.Image | None = None, harmonizer=None,
+                 zones: sitk.Image | None = None) -> dict:
     """images: {'t2w','dwi','adc','dce'(, ...)} -> {name: (D,H,W) float32 array}.
 
     Intensities are scaled to [-1, 1]. If a `harmonizer` is given it owns the
     intensity step (cross-scanner harmonization + scaling); otherwise a robust
     per-image percentile normalization is used. A 'mask' label image is
-    resampled with nearest-neighbour and returned under key 'mask'.
+    resampled with nearest-neighbour and returned under key 'mask'. When a
+    `zones` label image (1=TZ, 2=PZ) is given, a per-voxel 'zone_weight' map
+    (TZ->tz_weight, PZ->pz_weight, else 1.0) is also returned for the ROI loss.
     """
-    raw, mask_arr = resample_case(images, cfg, mask)
+    raw, mask_arr, zones_arr = resample_case(images, cfg, mask, zones)
     out = {}
     for name, arr in raw.items():
         if harmonizer is not None and harmonizer.has(name):
@@ -147,6 +157,14 @@ def process_case(images: dict, cfg: PreprocessConfig,
         if cfg.spatial_size is not None:
             mask_arr = center_crop_pad(mask_arr, cfg.spatial_size, 0.0)
         out["mask"] = (mask_arr > 0.5).astype(np.float32)
+    if zones_arr is not None:
+        if cfg.spatial_size is not None:
+            zones_arr = center_crop_pad(zones_arr, cfg.spatial_size, 0.0)
+        zl = np.round(zones_arr)
+        zw = np.ones_like(zones_arr, dtype=np.float32)
+        zw[zl == 1] = cfg.tz_weight        # transition zone
+        zw[zl == 2] = cfg.pz_weight        # peripheral zone (DCE matters here)
+        out["zone_weight"] = zw
     return out
 
 
