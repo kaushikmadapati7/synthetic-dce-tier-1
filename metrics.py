@@ -61,6 +61,36 @@ def roi_radiomics(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     }
 
 
+def _masked_pearson(pred, target, m) -> float | None:
+    m = m > 0.5
+    if m.sum() < 16:
+        return None
+    p, t = pred[m].flatten().float(), target[m].flatten().float()
+    pc, tc = p - p.mean(), t - t.mean()
+    denom = (pc.norm() * tc.norm()).clamp(min=1e-8)
+    return float((pc * tc).sum() / denom)
+
+
+@torch.no_grad()
+def zone_metrics(pred: torch.Tensor, target: torch.Tensor, zones: torch.Tensor | None) -> dict:
+    """Per-zone localization, split by the PZ/TZ label map (1=TZ, 2=PZ). DCE is
+    clinically read in the PZ, so `roi_pearson_pz` is the zone number that matters
+    -- and the one zone-weighted training is meant to lift. Whole-gland metrics
+    average PZ and TZ together and can hide a PZ gain bought at TZ's expense."""
+    out = {}
+    if zones is None or zones.sum() == 0:
+        return out
+    for name, lbl in (("pz", 2), ("tz", 1)):
+        zm = (zones.round() == lbl).float()
+        r = _masked_pearson(pred, target, zm)
+        if r is not None:
+            out[f"roi_pearson_{name}"] = r
+            m = zm > 0.5
+            out[f"roi_p75_err_{name}"] = float(
+                (pred[m].float().quantile(0.75) - target[m].float().quantile(0.75)).abs())
+    return out
+
+
 @torch.no_grad()
 def roi_p75(vol: torch.Tensor, mask: torch.Tensor) -> float | None:
     """Scalar ROI 75th-percentile (enhancement level) of one volume; None if the
@@ -85,9 +115,10 @@ def pearson(xs: list[float], ys: list[float]) -> float | None:
 
 @torch.no_grad()
 def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
-                 mask: torch.Tensor | None = None) -> dict:
+                 mask: torch.Tensor | None = None, zones: torch.Tensor | None = None) -> dict:
     """Per-batch metrics. If a mask is given, MAE plus the ROI radiomic-fidelity
-    metrics (see ``roi_radiomics``) are also computed inside the ROI."""
+    metrics (see ``roi_radiomics``) are also computed inside the ROI; if a PZ/TZ
+    zone label map is given, per-zone localization is added (see ``zone_metrics``)."""
     out = {
         "ssim": float(ssim3d(pred, target)),
         "psnr": float(psnr(pred, target)),
@@ -99,6 +130,7 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
         out["psnr_roi"] = float(psnr(pred[m], target[m]))
         out["ssim_roi"] = float(ssim3d(pred, target, return_map=True)[m].mean())
         out.update(roi_radiomics(pred, target, mask))
+        out.update(zone_metrics(pred, target, zones))
     return out
 
 

@@ -118,13 +118,15 @@ def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
         mask = arrays["mask"][None]
     else:
         mask = np.zeros_like(target)
-    # zone_weight defaults to all-ones (no zone effect) when zones are unavailable
+    # zone_weight defaults to all-ones (no zone effect); zones label map to zeros
     zw = arrays["zone_weight"][None] if "zone_weight" in arrays else np.ones_like(target)
+    zones = arrays["zones"][None] if "zones" in arrays else np.zeros_like(target)
     return {
         "cond": torch.from_numpy(cond).float(),
         "target": torch.from_numpy(target).float(),
         "mask": torch.from_numpy(mask).float(),
         "zone_weight": torch.from_numpy(zw).float(),
+        "zones": torch.from_numpy(zones).float(),
         "id": case_id,
     }
 

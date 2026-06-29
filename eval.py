@@ -27,10 +27,11 @@ def evaluate(args, gen, test_loader, device):
     for batch in test_loader:
         cond = batch["cond"].to(device); target = batch["target"].to(device)
         mask = batch["mask"].to(device)
+        zones = batch["zones"].to(device) if "zones" in batch else None
         pred = gen(cond).clamp(-1, 1)
         if pred.shape != target.shape:  # guard against any model/target size mismatch
             pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
-        per_batch.append(eval_metrics(pred, target, mask))
+        per_batch.append(eval_metrics(pred, target, mask, zones))
         for i in range(pred.size(0)):
             rr = roi_p75(target[i:i+1], mask[i:i+1]); pp = roi_p75(pred[i:i+1], mask[i:i+1])
             if rr is not None and pp is not None:
@@ -74,10 +75,11 @@ def save_indist_sample(args, gen, loader, device, montage_name="montage_indist")
     for batch in loader:
         cond = batch["cond"].to(device); target = batch["target"].to(device)
         mask = batch["mask"].to(device)
+        zones = batch["zones"].to(device) if "zones" in batch else None
         pred = gen(cond).clamp(-1, 1)
         if pred.shape != target.shape:
             pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
-        per_batch.append(eval_metrics(pred, target, mask))
+        per_batch.append(eval_metrics(pred, target, mask, zones))
         for i in range(pred.size(0)):
             rr = roi_p75(target[i:i+1], mask[i:i+1]); pp = roi_p75(pred[i:i+1], mask[i:i+1])
             if rr is not None and pp is not None:

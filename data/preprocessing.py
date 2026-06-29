@@ -165,6 +165,7 @@ def process_case(images: dict, cfg: PreprocessConfig,
         zw[zl == 1] = cfg.tz_weight        # transition zone
         zw[zl == 2] = cfg.pz_weight        # peripheral zone (DCE matters here)
         out["zone_weight"] = zw
+        out["zones"] = zl.astype(np.float32)   # label map (1=TZ, 2=PZ) for zone-split eval
     return out
 
 
