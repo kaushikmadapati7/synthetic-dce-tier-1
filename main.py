@@ -345,6 +345,9 @@ def parse_args():
                    help="EMA decay for the generator/UNet weights (0=off). EMA weights are "
                         "used for best-ckpt scoring, eval, and the saved checkpoints")
     # evaluation
+    p.add_argument("--synth-out", default="",
+                   help="generate_synth.py: dir to write synth_DCE.nii.gz per case "
+                        "(<synth-out>/<center>/<subject>/synth_DCE.nii.gz)")
     p.add_argument("--eval-only", action="store_true", default=False,
                    help="skip training: load the model from --output-dir/checkpoints and "
                         "just run evaluation (reuses the saved harmonizer.json)")

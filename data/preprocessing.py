@@ -96,6 +96,25 @@ def center_crop_pad(arr: np.ndarray, size, pad_value=-1.0) -> np.ndarray:
     return out
 
 
+def uncrop_pad(arr: np.ndarray, orig_shape, pad_value=-1.0) -> np.ndarray:
+    """Inverse of center_crop_pad: place a cropped/padded `arr` back onto a full
+    `orig_shape` grid (regions that were cropped away become `pad_value`). Used to
+    write a model prediction back into the native reference geometry."""
+    out = np.full(orig_shape, pad_value, dtype=arr.dtype)
+    src_slices, dst_slices = [], []
+    for a, s in zip(orig_shape, arr.shape):
+        if a >= s:
+            start = (a - s) // 2
+            src_slices.append(slice(start, start + s))
+            dst_slices.append(slice(0, s))
+        else:
+            start = (s - a) // 2
+            src_slices.append(slice(0, a))
+            dst_slices.append(slice(start, start + a))
+    out[tuple(src_slices)] = arr[tuple(dst_slices)]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # High-level: a set of modality images -> aligned, normalized arrays
 # ---------------------------------------------------------------------------
