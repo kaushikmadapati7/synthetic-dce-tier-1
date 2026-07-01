@@ -16,6 +16,8 @@
 set -euo pipefail
 
 CONDA_ENV=${CONDA_ENV:-kmadapati_env}
+MODEL=${MODEL:-gan}                           # gan (pix2pix) | ldm_flow (pixel-space 2D CFM)
+SAMPLE_STEPS=${SAMPLE_STEPS:-50}              # flow ODE steps (ignored by gan)
 DATA_ROOT=${DATA_ROOT:-/mnt/fac/CX000018_DS2/yanglab/Prostate_data_all/Bao_DCE}
 OUTPUT_DIR=${OUTPUT_DIR:-runs/px2d_${SLURM_JOB_ID:-local}}
 SPATIAL_SIZE=${SPATIAL_SIZE:-"32 256 256"}   # D H W; D = #slices/case, H W = native-ish in-plane
@@ -44,6 +46,7 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} px2d  data=${DATA_ROOT} out=${OUTPUT_DIR}"
 
 srun python -m tier1_static.main2d \
+  --model "${MODEL}" --sample-steps "${SAMPLE_STEPS}" \
   --data-root "${DATA_ROOT}" --output-dir "${OUTPUT_DIR}" \
   --spatial-size ${SPATIAL_SIZE} --epochs "${EPOCHS}" --batch-size "${BATCH_SIZE}" \
   --base-ch "${BASE_CH}" --lr "${LR}" --ckpt-every "${CKPT_EVERY}" --val-frac "${VAL_FRAC}" \
