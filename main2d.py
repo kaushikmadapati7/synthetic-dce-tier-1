@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from .main import parse_args, build_data, make_criterion, set_seed, setup_logging
 from .models import d_hinge_loss, g_hinge_loss
 from .models.gan2d import Generator2D, PatchDiscriminator2D
+from .models.flow2d import FlowMatching2D
 from .data.slice_dataset import SliceDCEDataset
 from .metrics import eval_metrics, aggregate, roi_p75, pearson
 from .eval import save_samples
@@ -83,49 +84,65 @@ def main():
     log.info(f"2D slices/epoch: train {len(train.dataset)}  "
              f"val {len(val.dataset) if val else 0}  test {len(test.dataset) if test else 0}")
 
-    G = Generator2D(in_ch=3, out_ch=1, base=args.base_ch).to(device)
-    D = PatchDiscriminator2D(in_ch=1, cond_ch=3, base=args.base_ch).to(device)
-    log.info(f"2D GAN: G={sum(p.numel() for p in G.parameters())/1e6:.1f}M "
-             f"D={sum(p.numel() for p in D.parameters())/1e6:.1f}M")
     criterion = make_criterion(args, device)
-    opt_g = torch.optim.Adam(G.parameters(), lr=args.lr, betas=(0.5, 0.999))
-    opt_d = torch.optim.Adam(D.parameters(), lr=args.lr, betas=(0.5, 0.999))
+    is_flow = args.model != "gan"
+    name = "flow2d" if is_flow else "gan2d"
+
+    if is_flow:                                   # pixel-space 2D CFM
+        model = FlowMatching2D(cond_ch=3, base=args.base_ch,
+                               source=getattr(args, "flow_source", "noise")).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+        gen = lambda c: model.sample(c, steps=args.sample_steps).clamp(-1, 1)
+        log.info(f"2D flow: {sum(p.numel() for p in model.parameters())/1e6:.1f}M source={model.source}")
+    else:                                         # pix2pix 2D GAN
+        model = Generator2D(in_ch=3, out_ch=1, base=args.base_ch).to(device)
+        disc = PatchDiscriminator2D(in_ch=1, cond_ch=3, base=args.base_ch).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.5, 0.999))
+        opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
+        gen = lambda c: model(c)
+        log.info(f"2D GAN: G={sum(p.numel() for p in model.parameters())/1e6:.1f}M "
+                 f"D={sum(p.numel() for p in disc.parameters())/1e6:.1f}M")
 
     best = float("-inf")
     for epoch in range(args.epochs):
-        G.train(); D.train(); t0 = time.time(); agg = {}
+        model.train(); t0 = time.time(); agg = {}
         for b in train:
             cond = b["cond"].to(device); real = b["target"].to(device); mask = b["mask"].to(device)
             zw = b["zone_weight"].to(device) if "zone_weight" in b else None
-            fake = G(cond)
-            d_loss = d_hinge_loss(D(real, cond), D(fake.detach(), cond))
-            opt_d.zero_grad(); d_loss.backward(); opt_d.step()
-            g_adv = g_hinge_loss(D(fake, cond))
-            rec, parts = criterion(_w5(fake), _w5(real), _w5(mask), zone_weight=_w5(zw))
-            g_loss = args.adv_weight * g_adv + rec
-            opt_g.zero_grad(); g_loss.backward(); opt_g.step()
-            for k, v in {"d": float(d_loss.detach()), "g": float(g_loss.detach()),
-                         "adv": float(g_adv.detach()), **parts}.items():
-                agg[k] = agg.get(k, 0.0) + v
+            if is_flow:
+                loss = model.loss(real, cond, mask=_w5(mask), roi_weight=args.roi_weight)
+                opt.zero_grad(); loss.backward(); opt.step()
+                agg["diff"] = agg.get("diff", 0.0) + float(loss.detach())
+            else:
+                fake = model(cond)
+                d_loss = d_hinge_loss(disc(real, cond), disc(fake.detach(), cond))
+                opt_d.zero_grad(); d_loss.backward(); opt_d.step()
+                g_adv = g_hinge_loss(disc(fake, cond))
+                rec, parts = criterion(_w5(fake), _w5(real), _w5(mask), zone_weight=_w5(zw))
+                g_loss = args.adv_weight * g_adv + rec
+                opt.zero_grad(); g_loss.backward(); opt.step()
+                for k, v in {"d": float(d_loss.detach()), "g": float(g_loss.detach()),
+                             "adv": float(g_adv.detach()), **parts}.items():
+                    agg[k] = agg.get(k, 0.0) + v
         msg = "  ".join(f"{k}={v/max(1,len(train)):.4f}" for k, v in agg.items())
         log.info(f"[epoch {epoch+1}/{args.epochs}] {msg}  ({time.time()-t0:.1f}s)")
 
         if val is not None and ((epoch + 1) % args.ckpt_every == 0 or epoch + 1 == args.epochs):
-            G.eval()
-            m, _ = evaluate2d(lambda c: G(c), val, device, "VAL")
+            model.eval()
+            m, _ = evaluate2d(gen, val, device, "VAL")
             score = m.get("ssim_roi", m.get("ssim", float("-inf")))
             if score > best:
                 best = score
-                torch.save(G.state_dict(), out / "gan2d_best.pt")
-                log.info(f"  ** new best 2D GAN: val_ssim_roi={score:.4f} -> gan2d_best.pt")
-    torch.save(G.state_dict(), out / "gan2d_last.pt")
+                torch.save(model.state_dict(), out / f"{name}_best.pt")
+                log.info(f"  ** new best 2D {name}: val_ssim_roi={score:.4f} -> {name}_best.pt")
+    torch.save(model.state_dict(), out / f"{name}_last.pt")
 
     # final: load best, eval test + val, save an in-distribution montage
-    if (out / "gan2d_best.pt").exists():
-        G.load_state_dict(torch.load(out / "gan2d_best.pt", map_location=device))
-    G.eval()
-    evaluate2d(lambda c: G(c), test, device, "TEST")
-    _, first = evaluate2d(lambda c: G(c), val, device, "VAL")
+    if (out / f"{name}_best.pt").exists():
+        model.load_state_dict(torch.load(out / f"{name}_best.pt", map_location=device))
+    model.eval()
+    evaluate2d(gen, test, device, "TEST")
+    _, first = evaluate2d(gen, val, device, "VAL")
     if first is not None:
         cond, target, pred, mask, cid = first
         save_samples(out / "samples", _w5(cond), _w5(target), _w5(pred), _w5(mask),
