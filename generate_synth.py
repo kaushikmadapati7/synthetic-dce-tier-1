@@ -52,14 +52,21 @@ def main():
     train, val, test = build_data(args)
     _, gen = LOADERS[args.model](args, train, test, device)
 
-    n = 0
+    n = skipped = 0
     for loader in (train, val, test):
         if loader is None:
             continue
         for batch in loader:
+            ids = batch["id"]
+            # resume: if every case in this batch is already written, skip the gen
+            if all((synth_out / c / "synth_DCE.nii.gz").exists() for c in ids):
+                skipped += len(ids)
+                continue
             cond = batch["cond"].to(device)
             preds = gen(cond).clamp(-1, 1).cpu().numpy()   # (B,1,D,H,W) on the DCE-cropped grid
-            for i, cid in enumerate(batch["id"]):
+            for i, cid in enumerate(ids):
+                if (synth_out / cid / "synth_DCE.nii.gz").exists():
+                    skipped += 1; continue
                 ref = _dce_ref(args.data_root, args.image_subdir, cid)
                 if ref is None:
                     log.warning(f"no DCE ref for {cid}; skipping"); continue
@@ -72,8 +79,8 @@ def main():
                 sitk.WriteImage(img, str(dst / "synth_DCE.nii.gz"))
                 n += 1
                 if n % 50 == 0:
-                    log.info(f"  wrote {n} synth_DCE volumes")
-    log.info(f"done: {n} synth_DCE.nii.gz under {synth_out}")
+                    log.info(f"  wrote {n} synth_DCE volumes ({skipped} already existed)")
+    log.info(f"done: {n} synth_DCE.nii.gz written, {skipped} skipped, under {synth_out}")
 
 
 if __name__ == "__main__":
