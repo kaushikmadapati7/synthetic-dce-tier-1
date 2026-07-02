@@ -80,13 +80,16 @@ def _set_scaling_factor(vae, train_loader, device, center=False):
 
 def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
     w = getattr(args, "guidance_scale", 1.0)
+    # the sampler's noise tensor must match the first stage's latent channels, NOT
+    # args.latent_channels (they diverge for --first-stage wavelet: 8**levels)
+    lat_ch = getattr(ldm.autoencoder, "latent_channels", args.latent_channels)
     src_t2w = flow and getattr(args, "flow_source", "noise") == "t2w"
     def gen(cond):
         # image-to-image flow: start the ODE from the encoded T2w (cond channel 0)
         source = ldm.encode(cond[:, 0:1]) if src_t2w else None
         cond = prep_cond(cond, args, training=False)   # Layer-1: fixed --eval-modalities subset
         cond_ds = downsample_cond(cond, lat_spatial)
-        shape = (cond.size(0), args.latent_channels, *lat_spatial)
+        shape = (cond.size(0), lat_ch, *lat_spatial)
         if flow:
             return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds,
                               guidance_scale=w, source=source)
