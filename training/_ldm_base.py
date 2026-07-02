@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 
-from ..models import (AutoencoderKL3D, LDM_DDPM, LDM_FlowMatching,
+from ..models import (AutoencoderKL3D, WaveletFirstStage3D, LDM_DDPM, LDM_FlowMatching,
                       PatchDiscriminator3D, CondPatchDiscriminator3D,
                       d_hinge_loss, feature_matching_loss)
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
@@ -26,12 +26,24 @@ def _cond_channels(args):
     return 6 if getattr(args, "modality_dropout", False) else 3
 
 
+def _new_first_stage(args, device):
+    """The (untrained) first stage: a learned VAE (default) or a fixed invertible
+    3D Haar wavelet transform (``--first-stage wavelet``). Both expose the same
+    encode/decode/decoder/scaling_factor/latent_shift/latent_channels interface so
+    the LDM classes are agnostic. Returns (module, latent_channels)."""
+    if getattr(args, "first_stage", "vae") == "wavelet":
+        fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
+        return fs, fs.latent_channels
+    fs = AutoencoderKL3D(in_channels=1, out_channels=1,
+                         latent_channels=args.latent_channels, base_ch=args.base_ch,
+                         ch_mults=tuple(args.ch_mults)).to(device)
+    return fs, fs.latent_channels
+
+
 def _build_ldm(args, device, flow: bool):
-    """Construct the VAE + (flow|ddpm) LDM with the configured architecture."""
-    vae = AutoencoderKL3D(in_channels=1, out_channels=1,
-                          latent_channels=args.latent_channels, base_ch=args.base_ch,
-                          ch_mults=tuple(args.ch_mults)).to(device)
-    unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
+    """Construct the first stage + (flow|ddpm) LDM with the configured architecture."""
+    vae, lat_ch = _new_first_stage(args, device)
+    unet_kwargs = dict(in_channels=lat_ch, out_channels=lat_ch,
                        cond_channels=_cond_channels(args), base_ch=args.base_ch,
                        ch_mults=tuple(args.unet_ch_mults),
                        cond_dim=getattr(args, "cond_dim", 0))
@@ -99,6 +111,20 @@ def load_ldm(args, train_loader, test_loader, device, flow: bool):
     return ldm, _ldm_gen(ldm, args, lat_spatial, device, flow)
 
 
+def build_first_stage(args, train_loader, criterion, device):
+    """Return a ready-to-use, frozen first stage. Wavelet: fit per-subband stats
+    (no training, it's lossless). VAE: train it (or load --vae-ckpt)."""
+    if getattr(args, "first_stage", "vae") == "wavelet":
+        fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
+        fs.fit(train_loader, device)
+        log.info(f"wavelet first stage: levels={fs.levels}, latent_channels={fs.latent_channels} "
+                 f"(lossless, no training); subband std range "
+                 f"[{fs.coeff_std.min().item():.3f}, {fs.coeff_std.max().item():.3f}]")
+        _set_scaling_factor(fs, train_loader, device, center=getattr(args, "latent_center", False))
+        return fs
+    return train_vae(args, train_loader, criterion, device)
+
+
 def train_vae(args, train_loader, criterion, device):
     vae = AutoencoderKL3D(in_channels=1, out_channels=1,
                           latent_channels=args.latent_channels, base_ch=args.base_ch,
@@ -159,7 +185,8 @@ def train_vae(args, train_loader, criterion, device):
 
 
 def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, flow: bool):
-    vae = train_vae(args, train_loader, criterion, device)
+    vae = build_first_stage(args, train_loader, criterion, device)
+    lat_ch = getattr(vae, "latent_channels", args.latent_channels)
 
     # infer latent spatial size from one encode
     with torch.no_grad():
@@ -167,7 +194,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     lat_spatial = tuple(z0.shape[2:])
     log.info(f"latent grid: {z0.shape[1]}x{lat_spatial}")
 
-    unet_kwargs = dict(in_channels=args.latent_channels, out_channels=args.latent_channels,
+    unet_kwargs = dict(in_channels=lat_ch, out_channels=lat_ch,
                        cond_channels=_cond_channels(args), base_ch=args.base_ch,
                        ch_mults=tuple(args.unet_ch_mults),
                        cond_dim=getattr(args, "cond_dim", 0))

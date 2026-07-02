@@ -162,6 +162,7 @@ class AutoencoderKL3D(nn.Module):
                                  num_res_blocks, attn_resolutions)
         self.decoder = Decoder3D(out_channels, base_ch, ch_mults, latent_channels,
                                  num_res_blocks, attn_resolutions)
+        self.latent_channels = latent_channels  # exposed so first stages share an interface
         self.scaling_factor = scaling_factor
         self.latent_shift = 0.0  # set post-training like scaling_factor; 0.0 = no centering
 

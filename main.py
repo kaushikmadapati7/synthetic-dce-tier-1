@@ -255,6 +255,16 @@ def parse_args():
     p.add_argument("--z-dim", type=int, default=128)
     p.add_argument("--n-upsamples", type=int, default=4, help="GAN up/down sampling depth")
     p.add_argument("--latent-channels", type=int, default=4)
+    p.add_argument("--first-stage", choices=["vae", "wavelet"], default="vae",
+                   help="LDM first stage: 'vae' (learned AutoencoderKL3D, default) or 'wavelet' "
+                        "(fixed invertible 3D Haar transform, FlowLet-style). Wavelet is lossless "
+                        "and untrained, so the flow's --anchor-weight recon is supervised through "
+                        "an EXACT inverse -- the clean image-space ROI signal the VAE smears. "
+                        "latent_channels becomes 8**wavelet_levels; the VAE knobs are ignored")
+    p.add_argument("--wavelet-levels", type=int, default=1,
+                   help="Haar packet levels for --first-stage wavelet: 1 -> 8ch at D/2 (FlowLet "
+                        "default), 2 -> 64ch at D/4 (8x smaller feature maps, cheaper 3D). "
+                        "D,H,W must each be divisible by 2**levels")
     p.add_argument("--ch-mults", type=int, nargs="+", default=[1, 2, 4], help="VAE")
     p.add_argument("--unet-ch-mults", type=int, nargs="+", default=[1, 2, 4], help="diffusion UNet")
     p.add_argument("--kl-weight", type=float, default=1e-6)
