@@ -72,15 +72,16 @@ class LDM_DDPM(CFGMixin, nn.Module):
         return _extract(self.sqrt_acp, t, z0.shape) * z0 + \
             _extract(self.sqrt_one_minus_acp, t, z0.shape) * noise
 
-    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0):
+    def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0, channel_weight=None):
         """z0: a clean latent. ``mask`` (latent-grid prostate mask) + roi_weight
-        give the noise-prediction objective ROI emphasis."""
+        give the noise-prediction objective ROI emphasis. ``channel_weight`` (C,)
+        optionally reweights latent channels (e.g. wavelet-subband energy)."""
         b = z0.shape[0]
         t = torch.randint(0, self.timesteps, (b,), device=z0.device)
         noise = torch.randn_like(z0)
         zt = self.q_sample(z0, t, noise)
         pred = self.unet(zt, t.float(), cond=self._drop_cond(cond), labels=labels)
-        return roi_weighted_mse(pred, noise, mask, roi_weight)
+        return roi_weighted_mse(pred, noise, mask, roi_weight, channel_weight)
 
     # ---- sampling ----
     @torch.no_grad()

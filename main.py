@@ -265,6 +265,16 @@ def parse_args():
                    help="Haar packet levels for --first-stage wavelet: 1 -> 8ch at D/2 (FlowLet "
                         "default), 2 -> 64ch at D/4 (8x smaller feature maps, cheaper 3D). "
                         "D,H,W must each be divisible by 2**levels")
+    p.add_argument("--wavelet-loss", choices=["uniform", "energy"], default="energy",
+                   help="wavelet-flow velocity-loss channel weighting. Subbands are standardized "
+                        "to unit variance, so 'uniform' MSE spends equal budget on near-flat HF "
+                        "subbands (noise) as on the structural LF band. 'energy' (default) reweights "
+                        "channels by natural subband variance (image-space L2), so the structural "
+                        "band dominates. 'uniform' reproduces the pre-fix behavior")
+    p.add_argument("--wavelet-loss-gamma", type=float, default=1.0,
+                   help="exponent on subband variance for --wavelet-loss energy: 1.0 = variance-"
+                        "proportional (true image-L2), 0.5 = std-proportional (gentler), 0 = uniform. "
+                        "Lower keeps more gradient on detail bands (more texture, less LF emphasis)")
     p.add_argument("--ch-mults", type=int, nargs="+", default=[1, 2, 4], help="VAE")
     p.add_argument("--unet-ch-mults", type=int, nargs="+", default=[1, 2, 4], help="diffusion UNet")
     p.add_argument("--kl-weight", type=float, default=1e-6)

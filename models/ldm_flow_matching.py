@@ -45,7 +45,7 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
 
     # ---- training ----
     def loss(self, z0, cond=None, labels=None, mask=None, roi_weight=1.0,
-             source=None,
+             source=None, channel_weight=None,
              anchor_image=None, anchor_mask=None, anchor_zone_weight=None,
              anchor_criterion=None, anchor_weight=0.0, anchor_t_max=1.0):
         """z0: clean latent. t=0 -> data, t=1 -> the ``source`` endpoint. ``mask``
@@ -73,7 +73,7 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
         target = noise - (1.0 - self.sigma_min) * z0  # dz_t/dt
 
         pred = self.unet(zt, t * self.time_scale, cond=self._drop_cond(cond), labels=labels)
-        loss = roi_weighted_mse(pred, target, mask, roi_weight)
+        loss = roi_weighted_mse(pred, target, mask, roi_weight, channel_weight)
 
         if anchor_weight > 0 and anchor_image is not None and self.autoencoder is not None:
             lo = t < anchor_t_max                         # only anchor where z0_hat is a sharp estimate

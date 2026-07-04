@@ -40,6 +40,20 @@ def _new_first_stage(args, device):
     return fs, fs.latent_channels
 
 
+def _wavelet_channel_weight(args, first_stage, device):
+    """Per-subband loss weight (C,) for the wavelet first stage: variance**gamma,
+    normalized to mean 1 (so overall loss scale is unchanged). gamma=1 recovers
+    the natural image-space L2 balance (structural low-freq band dominates); the
+    near-flat, unit-normalized high-freq subbands are down-weighted to their real
+    energy. Returns None for the VAE stage or --wavelet-loss uniform (uniform MSE).
+    Uses coeff_std (a saved buffer), so it's consistent train vs eval."""
+    if getattr(args, "first_stage", "vae") != "wavelet" or getattr(args, "wavelet_loss", "energy") != "energy":
+        return None
+    var = (first_stage.coeff_std.to(device) ** 2)
+    w = var ** getattr(args, "wavelet_loss_gamma", 1.0)
+    return w * (w.numel() / w.sum())
+
+
 def _build_ldm(args, device, flow: bool):
     """Construct the first stage + (flow|ddpm) LDM with the configured architecture."""
     vae, lat_ch = _new_first_stage(args, device)
@@ -230,6 +244,16 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                  f"feat_w={getattr(args, 'flow_feat_weight', 1.0)} "
                  f"warmup={getattr(args, 'flow_adv_warmup', 10)} t={getattr(args, 'flow_adv_t', 0.5)}")
 
+    # wavelet-subband energy weighting: reweight the velocity loss per channel by
+    # natural subband variance so the structural (low-freq) band dominates instead
+    # of the unit-normalized near-flat HF subbands. Fixed after the fit, so compute
+    # once. None (uniform) for the VAE first stage or --wavelet-loss uniform.
+    channel_weight = _wavelet_channel_weight(args, vae, device)
+    if channel_weight is not None:
+        log.info(f"wavelet energy loss (gamma={args.wavelet_loss_gamma}): channel weight "
+                 f"range [{channel_weight.min().item():.3f}, {channel_weight.max().item():.3f}], "
+                 f"top-band share {channel_weight.max().item()/channel_weight.numel():.2%}")
+
     gen = _ldm_gen(ldm, args, lat_spatial, device, flow)
     val_every = args.val_every or args.ckpt_every
     best = float("-inf")
@@ -256,7 +280,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
                                  anchor_criterion=criterion, anchor_weight=args.anchor_weight,
                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
             loss = ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=args.roi_weight,
-                            source=source, **anchor_kw)
+                            source=source, channel_weight=channel_weight, **anchor_kw)
 
             if adv_on:
                 fake_img = ldm.predict_image(z0, cond=cond_ds, t_val=getattr(args, "flow_adv_t", 0.5))

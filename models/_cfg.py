@@ -16,14 +16,25 @@ no-op). A learned null embedding is a possible later refinement.
 import torch
 
 
-def roi_weighted_mse(pred, target, mask=None, roi_weight=1.0):
+def roi_weighted_mse(pred, target, mask=None, roi_weight=1.0, channel_weight=None):
     """MSE that upweights ROI voxels by ``roi_weight``. ``mask`` is the prostate
     mask downsampled to the latent grid (soft values in [0,1]). This gives the
     latent-diffusion objective the same direct prostate emphasis the GAN's recon
     loss has -- otherwise the diffusion MSE is ~99% background and the prostate
     (~1% of voxels) barely contributes to the gradient. No mask / roi_weight<=1
-    -> plain MSE."""
+    -> plain MSE.
+
+    ``channel_weight`` (C,) optionally reweights the latent channels before the
+    voxel reduction. For the wavelet first stage the channels are Haar subbands
+    that were standardized to unit variance, which flattens their very different
+    natural energies -- so a uniform MSE spends equal budget on the near-flat
+    high-frequency subbands (noise) as on the structural low-frequency band. An
+    energy-proportional channel_weight restores the natural (image-space L2)
+    balance so the structural band dominates the objective. Normalized to mean 1,
+    so the overall loss scale is unchanged."""
     se = (pred - target) ** 2
+    if channel_weight is not None:
+        se = se * channel_weight.view(1, -1, *([1] * (se.dim() - 2)))
     if mask is None or roi_weight <= 1.0:
         return se.mean()
     w = 1.0 + (roi_weight - 1.0) * mask        # (B,1,...) broadcasts over latent channels
