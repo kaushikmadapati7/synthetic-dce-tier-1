@@ -31,6 +31,7 @@ default Tier-1 held-out test is therefore `jiulong` (override via --test-hospita
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -40,7 +41,7 @@ import torch
 from torch.utils.data import Dataset, ConcatDataset
 
 from .preprocessing import (PreprocessConfig, load_sitk, process_case,
-                            resample_case, peak_phase_index)
+                            resample_case, peak_phase_index, select_phase_by_time)
 
 log = logging.getLogger("tier1")
 
@@ -290,6 +291,108 @@ class DescriptorDCEDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# Bao_newbatch_2312_2512 (flat registered/<case>/ layout, multi-phase, time-select)
+# ---------------------------------------------------------------------------
+# stems for the newbatch registered tree (note DWI_b1500 and _to_T2W suffixes)
+NEWBATCH_STEMS = {
+    "t2w": ["T2W"],
+    "adc": ["ADC_to_T2W", "ADC"],
+    "dwi": ["DWI_b1500_to_T2W", "DWI_to_T2W", "DWI"],
+}
+
+
+class NewbatchDCEDataset(Dataset):
+    """The Bao_newbatch_2312_2512 data-scale cohort. Layout differs from silver:
+
+      registered/<case>/  T2W, ADC_to_T2W, DWI_b1500_to_T2W (often absent),
+                          prostate_mask, prostate_zones (co-located, not a parallel tree)
+      registered/<case>/DCE/  phase_00..NN, dce_times.json
+
+    The target phase is chosen by ACQUISITION TIME (`select_phase_by_time`, robust
+    to the timing file's corrupt trailing entries), keeping it phase-consistent with
+    the single-phase centers' early-wash-in target across this vendor-heterogeneous
+    (16-phase Siemens / 26-phase GE) cohort. DWI is missing for most cases -> filled
+    with background (pad_value) so the (t2w,dwi,adc) stack is complete; pair with
+    modality-dropout for a principled missing-DWI signal, or set `require_dwi` to keep
+    only the full-3-modality subset. Train-augmentation only (no center-level test).
+    """
+
+    def __init__(self, root, cfg: PreprocessConfig | None = None, harmonizer=None,
+                 subject_glob="*", target_time: float = 30.0, t_max: float = 400.0,
+                 require_dwi: bool = False):
+        self.root = Path(root)
+        self.cfg = cfg or PreprocessConfig()
+        self.harmonizer = harmonizer
+        self.target_time = target_time
+        self.t_max = t_max
+        self.require_dwi = require_dwi
+        self.samples = []
+        found = skipped = no_dwi = 0
+        for subj in sorted(self.root.glob(subject_glob)):
+            if not subj.is_dir():
+                continue
+            t2 = _resolve_stem(subj, NEWBATCH_STEMS["t2w"])
+            adc = _resolve_stem(subj, NEWBATCH_STEMS["adc"])
+            dwi = _resolve_stem(subj, NEWBATCH_STEMS["dwi"])
+            times = subj / "DCE" / "dce_times.json"
+            mask = subj / "prostate_mask.nii.gz"
+            if not (t2 and adc and times.exists() and mask.exists()):
+                skipped += 1
+                continue
+            if require_dwi and dwi is None:
+                skipped += 1
+                continue
+            if dwi is None:
+                no_dwi += 1
+            self.samples.append((subj.name, subj))
+            found += 1
+        log.info(f"[newbatch] {found} cases ({skipped} skipped, {no_dwi} without DWI -> "
+                 f"filled) under {self.root} | target_time={target_time}s require_dwi={require_dwi}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _select_phase_file(self, subj: Path):
+        """Time-selected DCE phase file for this case (guards corrupt timestamps)."""
+        times = json.loads((subj / "DCE" / "dce_times.json").read_text())
+        pt = [(p["idx"], p.get("rel_time_s")) for p in times["phases"]]
+        idx = select_phase_by_time(pt, self.target_time, self.t_max)
+        if idx is None:
+            idx = pt[0][0] if pt else 0        # degenerate fallback: first phase
+        p = subj / "DCE" / f"phase_{idx:02d}.nii.gz"
+        if not p.exists():                     # tolerate un-padded / alt naming
+            p = _resolve_stem(subj / "DCE", [f"phase_{idx:02d}", f"phase_{idx}"])
+        return p
+
+    def _load_images(self, i):
+        case_id, subj = self.samples[i]
+        paths = {"t2w": _resolve_stem(subj, NEWBATCH_STEMS["t2w"]),
+                 "adc": _resolve_stem(subj, NEWBATCH_STEMS["adc"])}
+        dwi = _resolve_stem(subj, NEWBATCH_STEMS["dwi"])
+        if dwi is not None:
+            paths["dwi"] = dwi
+        images = {k: load_sitk(p) for k, p in paths.items()}
+        images[DCE_KEY] = load_sitk(self._select_phase_file(subj))
+        mask_path = subj / "prostate_mask.nii.gz"
+        zones_path = subj / "prostate_zones.nii.gz"
+        mask = load_sitk(mask_path) if mask_path.exists() else None
+        zones = load_sitk(zones_path) if zones_path.exists() else None
+        return case_id, images, mask, zones
+
+    def __getitem__(self, i):
+        case_id, images, mask, zones = self._load_images(i)
+        arrays = process_case(images, self.cfg, mask, self.harmonizer, zones=zones)
+        if "dwi" not in arrays:                # DWI absent -> background-filled channel
+            arrays["dwi"] = np.full_like(arrays["t2w"], self.cfg.pad_value)
+        return _stack_sample(arrays, case_id, self.cfg.spatial_size)
+
+    def raw_modalities(self, i) -> dict:
+        _, images, mask, _ = self._load_images(i)
+        raw, _, _ = resample_case(images, self.cfg, mask)
+        return raw
+
+
+# ---------------------------------------------------------------------------
 # Tier-1 convenience builder
 # ---------------------------------------------------------------------------
 class _EmptyDataset(Dataset):
@@ -303,7 +406,8 @@ class _EmptyDataset(Dataset):
 def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="train",
                          harmonizer=None, test_hospitals=None,
                          image_subdir=IMAGE_SUBDIR, mask_subdir=MASK_SUBDIR,
-                         dce_phase="early"):
+                         dce_phase="early", newbatch_root=None,
+                         newbatch_target_time=30.0, newbatch_require_dwi=False):
     """ConcatDataset over the canonical + descriptor cohorts for a given split.
 
     split: "train" -> all silver hospitals except the held-out test centers
@@ -312,6 +416,11 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
 
     `test_hospitals` defaults to TIER1_TEST_HOSPITALS (jiulong). Returns an empty
     dataset (len 0) if a split has no hospitals, so callers can guard on len().
+
+    `newbatch_root` (the Bao_newbatch_2312_2512/registered tree) is added as extra
+    TRAINING data only (data-scale lever) -- the held-out test stays the silver test
+    center, so eval stays comparable. It is never included in the test/all-as-test
+    split.
     """
     cfg = cfg or PreprocessConfig()
     test_hospitals = list(TIER1_TEST_HOSPITALS if test_hospitals is None else test_hospitals)
@@ -331,4 +440,8 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
         parts.append(CanonicalDCEDataset(bao_root, canon, cfg, **kw))
     if desc:
         parts.append(DescriptorDCEDataset(bao_root, desc, cfg, phase_select=dce_phase, **kw))
+    if newbatch_root and split in ("train", "all"):
+        parts.append(NewbatchDCEDataset(newbatch_root, cfg, harmonizer=harmonizer,
+                                        target_time=newbatch_target_time,
+                                        require_dwi=newbatch_require_dwi))
     return ConcatDataset(parts) if parts else _EmptyDataset()

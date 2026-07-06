@@ -28,8 +28,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from .data import (PreprocessConfig, Harmonizer, HarmonizationConfig,
-                   build_tier1_datasets, CanonicalDCEDataset, fit_harmonizer_from_dataset,
-                   CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
+                   build_tier1_datasets, CanonicalDCEDataset, NewbatchDCEDataset,
+                   fit_harmonizer_from_dataset, CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
 from .training import TRAINERS, LOADERS
 from .eval import evaluate, save_indist_sample
@@ -149,7 +149,9 @@ def build_data(args):
         train = torch.utils.data.Subset(train, range(min(args.limit, len(train))))
         test = torch.utils.data.Subset(test, range(min(max(1, args.limit // 4), len(test))))
 
-    # carve a random val split off train for best-checkpoint selection (no test leakage)
+    # carve a random val split off the SILVER train for best-checkpoint selection
+    # (no test leakage). Done BEFORE adding newbatch so the val set stays the same
+    # in-distribution silver cohort across runs -> VAL metrics stay comparable.
     val = None
     if args.val_frac and len(train) >= 4:
         n_val = max(1, int(round(len(train) * args.val_frac)))
@@ -157,6 +159,17 @@ def build_data(args):
         if n_train >= 1 and n_val >= 1:
             g = torch.Generator().manual_seed(args.seed)
             train, val = torch.utils.data.random_split(train, [n_train, n_val], generator=g)
+
+    # newbatch = extra TRAINING data only (data-scale lever); never in val/test, so
+    # eval stays a clean comparison against the silver-only baseline.
+    if args.newbatch_root:
+        nb_ds = NewbatchDCEDataset(args.newbatch_root, cfg, harmonizer=harmonizer,
+                                   target_time=args.newbatch_target_time,
+                                   require_dwi=args.newbatch_require_dwi)
+        if args.limit:
+            nb_ds = torch.utils.data.Subset(nb_ds, range(min(args.limit, len(nb_ds))))
+        train = torch.utils.data.ConcatDataset([train, nb_ds]) if len(train) else nb_ds
+        log.info(f"+newbatch: {len(nb_ds)} training cases added")
     log.info(f"train cases: {len(train)}  val cases: {len(val) if val else 0}  test cases: {len(test)}")
 
     dl = lambda ds, shuf: DataLoader(ds, batch_size=args.batch_size, shuffle=shuf,
@@ -234,6 +247,18 @@ def parse_args():
                    help="multi-phase (zhongyiyuan) target phase: 'early' (ph1, default — "
                         "matches the single-phase centers' early-phase DCE target), "
                         "'peak' (mask-mean argmax), or an int index. Single-phase centers unaffected.")
+    # Bao_newbatch data-scale cohort (extra TRAINING data; held-out test unchanged)
+    p.add_argument("--newbatch-root", default="",
+                   help="path to the Bao_newbatch_2312_2512/registered tree (flat <case>/ dirs, "
+                        "multi-phase DCE). Added as extra training data only; empty = off")
+    p.add_argument("--newbatch-target-time", type=float, default=30.0,
+                   help="target acquisition time (s post-baseline) for the newbatch DCE phase; the "
+                        "phase with the closest valid rel_time_s is used (early wash-in ~30s), keeping "
+                        "the target phase-consistent with the single-phase centers across vendors")
+    p.add_argument("--newbatch-require-dwi", action="store_true", default=False,
+                   help="keep only newbatch cases that have DWI (the full-3-modality subset, ~219). "
+                        "Default off = use all DCE cases (~517), filling missing DWI with background "
+                        "(pair with --modality-dropout for a principled missing-DWI signal)")
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--vae-epochs", type=int, default=50)

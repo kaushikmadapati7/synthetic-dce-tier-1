@@ -1,6 +1,6 @@
 from .preprocessing import (PreprocessConfig, process_case, resample_case,
                             peak_phase_index, load_sitk, normalize, center_crop_pad)
-from .dataset import (CanonicalDCEDataset, DescriptorDCEDataset,
+from .dataset import (CanonicalDCEDataset, DescriptorDCEDataset, NewbatchDCEDataset,
                       build_tier1_datasets, CANONICAL_HOSPITALS,
                       DESCRIPTOR_HOSPITALS, TIER1_TEST_HOSPITALS, INPUT_KEYS)
 from .harmonization import (Harmonizer, HarmonizationConfig, NyulStandardizer,
@@ -10,7 +10,7 @@ from .harmonization import (Harmonizer, HarmonizationConfig, NyulStandardizer,
 __all__ = [
     "PreprocessConfig", "process_case", "resample_case", "peak_phase_index",
     "load_sitk", "normalize", "center_crop_pad",
-    "CanonicalDCEDataset", "DescriptorDCEDataset", "build_tier1_datasets",
+    "CanonicalDCEDataset", "DescriptorDCEDataset", "NewbatchDCEDataset", "build_tier1_datasets",
     "CANONICAL_HOSPITALS", "DESCRIPTOR_HOSPITALS", "TIER1_TEST_HOSPITALS",
     "INPUT_KEYS",
     "Harmonizer", "HarmonizationConfig", "NyulStandardizer", "NyulConfig",

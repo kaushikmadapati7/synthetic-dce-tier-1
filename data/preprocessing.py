@@ -188,6 +188,33 @@ def process_case(images: dict, cfg: PreprocessConfig,
     return out
 
 
+def select_phase_by_time(phase_times, target_time: float = 30.0,
+                         t_max: float = 400.0) -> int | None:
+    """Pick the dynamic phase whose acquisition time is closest to ``target_time``
+    seconds, using only physiologically-valid timestamps.
+
+    ``phase_times`` is a list of ``(idx, rel_time_s)`` from a cohort's
+    ``dce_times.json`` (rel_time_s is seconds relative to the pre-contrast phase 0).
+    Selecting by absolute time -- not phase index -- is what makes a vendor-
+    heterogeneous multi-phase cohort (16-phase Siemens vs 26-phase GE, different
+    cadence) phase-consistent with the single-phase centers' early-wash-in target.
+
+    The newbatch timing files carry corrupt entries (e.g. a trailing 59177s), so we
+    trust only the clean monotonic-increasing prefix with 0<=t<=t_max and stop at
+    the first anomaly. Returns the selected phase idx, or None if no valid phase.
+    """
+    valid = []
+    last = -1.0
+    for idx, t in phase_times:
+        if t is None or t < 0.0 or t > t_max or t < last:
+            break                      # corruption / non-monotonic -> trust the clean prefix
+        valid.append((idx, t))
+        last = t
+    if not valid:
+        return None
+    return min(valid, key=lambda it: abs(it[1] - target_time))[0]
+
+
 def peak_phase_index(phase_imgs: list, mask_img: sitk.Image | None) -> int:
     """Argmax of mean intensity inside the prostate mask across dynamic phases.
 
