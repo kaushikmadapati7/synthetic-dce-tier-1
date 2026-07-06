@@ -400,6 +400,19 @@ def parse_args():
     p.add_argument("--synth-out", default="",
                    help="generate_synth.py: dir to write synth_DCE.nii.gz per case "
                         "(<synth-out>/<center>/<subject>/synth_DCE.nii.gz)")
+    # reader_study_export.py (blinded real-vs-synth DCE panels for a radiologist Turing test)
+    p.add_argument("--reader-out", default="",
+                   help="reader-study output dir; per-model export writes <reader-out>/staging/")
+    p.add_argument("--reader-cases", type=int, default=40,
+                   help="number of cases to export for the reader study")
+    p.add_argument("--reader-split", choices=["val", "test", "train"], default="val",
+                   help="which split to draw reader cases from (val = in-distribution, has real "
+                        "enhancement; jiulong test is near-flat and poor for a realism judgement)")
+    p.add_argument("--reader-with-context", action="store_true", default=False,
+                   help="render the real T2w beside each DCE panel for anatomical orientation "
+                        "(T2w is a real input either way, so it doesn't leak real-vs-synth)")
+    p.add_argument("--reader-include-real", action="store_true", default=False,
+                   help="also export the REAL DCE panels (run once, alongside one model's export)")
     p.add_argument("--eval-only", action="store_true", default=False,
                    help="skip training: load the model from --output-dir/checkpoints and "
                         "just run evaluation (reuses the saved harmonizer.json)")
