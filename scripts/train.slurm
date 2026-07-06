@@ -51,6 +51,8 @@ LR=${LR:-1e-4}
 CKPT_EVERY=${CKPT_EVERY:-10}
 VAL_FRAC=${VAL_FRAC:-0.1}          # train fraction held out for best-ckpt selection (0 = off)
 VAL_EVERY=${VAL_EVERY:-0}          # epochs between val scorings (0 = use CKPT_EVERY; set 2 for GAN)
+SELECT_METRIC=${SELECT_METRIC:-ssim_roi}  # best-ckpt metric: ssim_roi|roi_pearson|realism|balanced
+                                          # ('balanced' for the radiologist-reading realism goal)
 
 # ---- model size ---------------------------------------------------------------
 BASE_CH=${BASE_CH:-32}
@@ -145,6 +147,7 @@ ARGS=(
   --ckpt-every "${CKPT_EVERY}"
   --val-frac "${VAL_FRAC}"
   --val-every "${VAL_EVERY}"
+  --select-metric "${SELECT_METRIC}"
   --num-workers "${SLURM_CPUS_PER_TASK:-8}"
   --base-ch "${BASE_CH}"
   --n-upsamples "${N_UPSAMPLES}"

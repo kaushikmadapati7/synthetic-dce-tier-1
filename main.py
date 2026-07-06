@@ -269,6 +269,13 @@ def parse_args():
     p.add_argument("--val-frac", type=float, default=0.1,
                    help="fraction of train held out (random) for best-checkpoint "
                         "selection; 0 disables best-ckpt tracking (eval falls back to last)")
+    p.add_argument("--select-metric", choices=["ssim_roi", "roi_pearson", "realism", "balanced"],
+                   default="ssim_roi",
+                   help="best-checkpoint selection metric. 'ssim_roi' (legacy, SMOOTHNESS-biased -> "
+                        "rewards the blob); 'roi_pearson' (faithfulness/localization); 'realism' "
+                        "(label-free texture+detail+intensity realism proxy); 'balanced' (realistic "
+                        "AND faithful -- the clinical-realism objective). Use balanced for the "
+                        "radiologist-reading goal")
     p.add_argument("--val-every", type=int, default=0,
                    help="epochs between val-score checkpoint selections; 0 = use --ckpt-every. "
                         "Set small (e.g. 2) for the GAN, whose ROI fidelity peaks early")

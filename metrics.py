@@ -61,6 +61,74 @@ def roi_radiomics(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     }
 
 
+@torch.no_grad()
+def roi_sharpness(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> dict:
+    """Sharpness / high-frequency-detail fidelity inside the ROI -- the direct
+    quantifier of the 'blobby vs realistic' look that matters for a radiologist
+    reading the synthetic DCE. Gradient-magnitude energy (3D finite differences)
+    averaged over prostate voxels, as a pred/target ratio:
+
+      roi_grad_ratio  mean|grad(pred)| / mean|grad(target)| over ROI voxels
+                      1  = detail matches real, <1 = too smooth (blob), >1 = too
+                      noisy. Complements roi_var_ratio (intensity spread) with a
+                      spatial-frequency view -- a smooth blob has low grad_ratio
+                      even if its variance happens to match.
+    """
+    m = mask > 0.5
+    if m.sum() < 16:
+        return {}
+    def gmag(v):
+        v = v.float()
+        gs = torch.gradient(v, dim=(-3, -2, -1))
+        return torch.sqrt(sum(g ** 2 for g in gs) + 1e-12)
+    gp, gt = gmag(pred), gmag(target)
+    mp, mt = gp[m].mean(), gt[m].mean()
+    return {"roi_grad_ratio": min(float(mp / (mt + 1e-6)), 5.0)}
+
+
+# Keys that make up the label-free "realism panel" (how real it looks to a reader),
+# vs the faithfulness metrics (roi_pearson etc., is it in the right place).
+REALISM_KEYS = ("fid", "roi_w1", "roi_var_ratio", "roi_grad_ratio")
+
+
+def realism_score(agg: dict) -> float | None:
+    """A single label-free realism proxy in [0,1] (higher = more realistic) from
+    the texture/detail/intensity-distribution metrics -- a cheap stand-in for a
+    reader study to rank checkpoints/models between reader sessions. Rewards
+    var_ratio & grad_ratio near 1 (real amount of texture and detail) and a small
+    ROI intensity-histogram distance (roi_w1). FID is NOT included here (too
+    expensive per checkpoint); use it as the primary realism number at eval time."""
+    def near1(v):
+        return None if v is None else 1.0 - min(abs(v - 1.0), 1.0)
+    parts = [near1(agg.get("roi_var_ratio")), near1(agg.get("roi_grad_ratio"))]
+    if "roi_w1" in agg:
+        parts.append(1.0 - min(agg["roi_w1"], 1.0))
+    parts = [p for p in parts if p is not None]
+    return float(sum(parts) / len(parts)) if parts else None
+
+
+def selection_score(agg: dict, metric: str = "ssim_roi") -> float:
+    """Map an aggregated-metrics dict to a scalar for best-checkpoint selection.
+
+      ssim_roi     legacy default (SMOOTHNESS-biased -> rewards the blob)
+      roi_pearson  faithfulness / within-gland localization
+      realism      label-free realism proxy (texture+detail+intensity match)
+      balanced     0.5*max(0,roi_pearson) + 0.5*realism -- realistic AND faithful,
+                   the realism-primary-but-safety-guarded objective
+    """
+    if metric == "roi_pearson":
+        return agg.get("roi_pearson", float("-inf"))
+    if metric == "realism":
+        r = realism_score(agg)
+        return r if r is not None else float("-inf")
+    if metric == "balanced":
+        r = realism_score(agg)
+        if r is None:
+            return agg.get("ssim_roi", float("-inf"))
+        return 0.5 * max(0.0, agg.get("roi_pearson", 0.0)) + 0.5 * r
+    return agg.get("ssim_roi", agg.get("ssim", float("-inf")))   # default / "ssim_roi"
+
+
 def _masked_pearson(pred, target, m) -> float | None:
     m = m > 0.5
     if m.sum() < 16:
@@ -130,6 +198,7 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
         out["psnr_roi"] = float(psnr(pred[m], target[m]))
         out["ssim_roi"] = float(ssim3d(pred, target, return_map=True)[m].mean())
         out.update(roi_radiomics(pred, target, mask))
+        out.update(roi_sharpness(pred, target, mask))
         out.update(zone_metrics(pred, target, zones))
     return out
 

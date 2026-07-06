@@ -9,9 +9,24 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from .metrics import eval_metrics, aggregate, compute_fid, roi_p75, pearson
+from .metrics import (eval_metrics, aggregate, compute_fid, roi_p75, pearson,
+                      REALISM_KEYS, realism_score)
 
 log = logging.getLogger("tier1")
+
+
+def _log_realism(metrics: dict, tag: str):
+    """Log the label-free realism panel (how real it looks to a reader) separately
+    from the faithfulness metrics, per the clinical-realism objective. FID is the
+    primary realism number; roi_var_ratio/roi_grad_ratio (->1) and roi_w1 (->0)
+    are the texture/detail/intensity-distribution companions."""
+    panel = {k: round(metrics[k], 4) for k in REALISM_KEYS if k in metrics}
+    if not panel:
+        return
+    rs = realism_score(metrics)
+    extra = f"  realism_score={rs:.4f}" if rs is not None else ""
+    log.info(f"{tag} REALISM (real-looking? var_ratio/grad_ratio->1, w1->0, fid lower): "
+             f"{json.dumps(panel)}{extra}")
 
 
 @torch.no_grad()
@@ -54,6 +69,7 @@ def evaluate(args, gen, test_loader, device):
         if fid is not None:
             metrics["fid"] = fid
     log.info(f"TEST metrics: {json.dumps({k: round(v, 4) for k, v in metrics.items()})}")
+    _log_realism(metrics, "TEST")
     if first is not None:
         save_samples(Path(args.output_dir) / "samples", *first)
     return metrics
@@ -72,6 +88,8 @@ def save_indist_sample(args, gen, loader, device, montage_name="montage_indist")
         log.info("no val loader; skipping in-distribution eval")
         return
     per_batch, p75_real, p75_pred, first = [], [], [], None
+    all_preds, all_targets = [], []
+    compute_fid_flag = getattr(args, "compute_fid", True)
     for batch in loader:
         cond = batch["cond"].to(device); target = batch["target"].to(device)
         mask = batch["mask"].to(device)
@@ -84,13 +102,22 @@ def save_indist_sample(args, gen, loader, device, montage_name="montage_indist")
             rr = roi_p75(target[i:i+1], mask[i:i+1]); pp = roi_p75(pred[i:i+1], mask[i:i+1])
             if rr is not None and pp is not None:
                 p75_real.append(rr); p75_pred.append(pp)
+            if compute_fid_flag:
+                all_preds.append(pred[i].cpu()); all_targets.append(target[i].cpu())
         if first is None:
             first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), batch["id"][0])
     metrics = aggregate(per_batch)
     pc = pearson(p75_real, p75_pred)
     if pc is not None:
         metrics["p75_corr"] = pc
+    if compute_fid_flag and all_preds:   # VAL is the reliable in-distribution set -> FID here too
+        fid = compute_fid(all_preds, all_targets, device,
+                          slices_per_volume=getattr(args, "fid_slices", 8),
+                          batch_size=getattr(args, "fid_batch_size", 32))
+        if fid is not None:
+            metrics["fid"] = fid
     log.info(f"VAL metrics: {json.dumps({k: round(v, 4) for k, v in metrics.items()})}")
+    _log_realism(metrics, "VAL")
     if first is not None:
         cond, target, pred, mask, cid = first
         log.info(f"in-distribution sample [{cid}] (val)")

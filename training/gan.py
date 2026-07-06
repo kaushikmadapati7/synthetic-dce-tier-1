@@ -80,7 +80,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
             gan.eval()
             if ema: ema.apply_to(gan.generator)   # score + save the EMA generator
             best = save_best(args, "gan", gan, val_score(_gan_gen(gan, args, device),
-                                                         val_loader, device), best)
+                             val_loader, device, getattr(args, "select_metric", "ssim_roi")), best)
             if ema: ema.restore(gan.generator)
             gan.train()
 

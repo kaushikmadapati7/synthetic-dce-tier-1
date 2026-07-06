@@ -30,13 +30,15 @@ def save_ckpt(args, name, model, epoch, total_epochs, state_dict=False):
 
 
 @torch.no_grad()
-def val_score(gen, val_loader, device):
-    """Checkpoint-selection score: mean ROI-SSIM of ``gen`` over the val set
-    (falls back to global SSIM when no mask is present). Returns -inf when there
-    is no val set, so best-checkpoint tracking is a silent no-op in that case."""
+def val_score(gen, val_loader, device, metric="ssim_roi"):
+    """Checkpoint-selection score of ``gen`` over the val set. ``metric`` picks what
+    to maximize (see metrics.selection_score): 'ssim_roi' (legacy, smoothness-
+    biased), 'roi_pearson' (faithfulness), 'realism' (label-free realism proxy), or
+    'balanced' (realistic AND faithful -- the clinical-realism objective). Returns
+    -inf when there is no val set, so best-checkpoint tracking is a silent no-op."""
     if val_loader is None:
         return float("-inf")
-    from ..metrics import eval_metrics, aggregate
+    from ..metrics import eval_metrics, aggregate, selection_score
     per = []
     for batch in val_loader:
         cond = batch["cond"].to(device); target = batch["target"].to(device)
@@ -45,8 +47,7 @@ def val_score(gen, val_loader, device):
         if pred.shape != target.shape:
             pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
         per.append(eval_metrics(pred, target, mask))
-    agg = aggregate(per)
-    return agg.get("ssim_roi", agg.get("ssim", float("-inf")))
+    return selection_score(aggregate(per), metric)
 
 
 def save_best(args, name, model, score, best):
@@ -59,7 +60,8 @@ def save_best(args, name, model, score, best):
     d.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), d / f"{name}_best.pt")
     prev = "-inf" if best == float("-inf") else f"{best:.4f}"
-    log.info(f"  ** new best {name}: val_ssim_roi={score:.4f} (was {prev}) -> {name}_best.pt")
+    sel = getattr(args, "select_metric", "ssim_roi")
+    log.info(f"  ** new best {name}: val[{sel}]={score:.4f} (was {prev}) -> {name}_best.pt")
     return score
 
 
