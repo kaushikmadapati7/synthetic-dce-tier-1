@@ -11,7 +11,8 @@ from pathlib import Path
 
 import torch
 
-from ..models import (AutoencoderKL3D, WaveletFirstStage3D, LDM_DDPM, LDM_FlowMatching,
+from ..models import (AutoencoderKL3D, WaveletFirstStage3D, MedVAEFirstStage,
+                      LDM_DDPM, LDM_FlowMatching,
                       PatchDiscriminator3D, CondPatchDiscriminator3D,
                       d_hinge_loss, feature_matching_loss)
 from .utils import (log_epoch, save_ckpt, downsample_cond, is_ckpt_epoch,
@@ -31,8 +32,13 @@ def _new_first_stage(args, device):
     3D Haar wavelet transform (``--first-stage wavelet``). Both expose the same
     encode/decode/decoder/scaling_factor/latent_shift/latent_channels interface so
     the LDM classes are agnostic. Returns (module, latent_channels)."""
-    if getattr(args, "first_stage", "vae") == "wavelet":
+    stage = getattr(args, "first_stage", "vae")
+    if stage == "wavelet":
         fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
+        return fs, fs.latent_channels
+    if stage == "medvae":
+        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_3d"),
+                              modality=getattr(args, "medvae_modality", "mri")).to(device)
         return fs, fs.latent_channels
     fs = AutoencoderKL3D(in_channels=1, out_channels=1,
                          latent_channels=args.latent_channels, base_ch=args.base_ch,
@@ -131,12 +137,20 @@ def load_ldm(args, train_loader, test_loader, device, flow: bool):
 def build_first_stage(args, train_loader, criterion, device):
     """Return a ready-to-use, frozen first stage. Wavelet: fit per-subband stats
     (no training, it's lossless). VAE: train it (or load --vae-ckpt)."""
-    if getattr(args, "first_stage", "vae") == "wavelet":
+    stage = getattr(args, "first_stage", "vae")
+    if stage == "wavelet":
         fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
         fs.fit(train_loader, device)
         log.info(f"wavelet first stage: levels={fs.levels}, latent_channels={fs.latent_channels} "
                  f"(lossless, no training); subband std range "
                  f"[{fs.coeff_std.min().item():.3f}, {fs.coeff_std.max().item():.3f}]")
+        _set_scaling_factor(fs, train_loader, device, center=getattr(args, "latent_center", False))
+        return fs
+    if stage == "medvae":
+        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_3d"),
+                              modality=getattr(args, "medvae_modality", "mri")).to(device)
+        log.info(f"MedVAE first stage: {fs.model_name}, latent_channels={fs.latent_channels} "
+                 f"(frozen foundation VAE, pretrained; not in checkpoint)")
         _set_scaling_factor(fs, train_loader, device, center=getattr(args, "latent_center", False))
         return fs
     return train_vae(args, train_loader, criterion, device)
