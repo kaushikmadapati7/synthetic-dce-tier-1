@@ -120,6 +120,11 @@ set -u
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # torch_fidelity downloads the Inception backbone here; keep it off the (quota'd) HOME
 export TORCH_HOME=${TORCH_HOME:-$(pwd)/.torch}
+# --first-stage medvae loads MedVAE weights from the HF cache; compute nodes have no
+# internet, so point HF_HOME at the pre-downloaded cache and force offline (harmless
+# for non-MedVAE runs, which never touch HF).
+export HF_HOME=${HF_HOME:-/mnt/scratch/user/kmadapati/.hf}
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} model=${MODEL} env=${CONDA_ENV}"
 echo "data_root=${DATA_ROOT}  output_dir=${OUTPUT_DIR}"
