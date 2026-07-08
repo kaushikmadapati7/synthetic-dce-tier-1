@@ -106,7 +106,8 @@ def make_criterion(args, device) -> CustomLoss:
 # ---------------------------------------------------------------------------
 def build_data(args):
     cfg = PreprocessConfig(reference=args.reference, spatial_size=tuple(args.spatial_size),
-                           tz_weight=args.tz_weight, pz_weight=args.pz_weight)
+                           tz_weight=args.tz_weight, pz_weight=args.pz_weight,
+                           crop_to_prostate=getattr(args, "crop_to_prostate", False))
     out = Path(args.output_dir)
     layout = dict(image_subdir=args.image_subdir, mask_subdir=args.mask_subdir)
     test_hospitals = args.test_hospitals
@@ -255,6 +256,11 @@ def parse_args():
                    help="target acquisition time (s post-baseline) for the newbatch DCE phase; the "
                         "phase with the closest valid rel_time_s is used (early wash-in ~30s), keeping "
                         "the target phase-consistent with the single-phase centers across vendors")
+    p.add_argument("--crop-to-prostate", action="store_true", default=False,
+                   help="center the --spatial-size crop window on the prostate mask centroid "
+                        "(not the volume center), so a smaller box concentrates model + latent "
+                        "resolution on the gland. Pair with a small depth, e.g. --spatial-size "
+                        "16 128 128, to fix poor through-plane DCE reproduction (Clara, 2026-07-08)")
     p.add_argument("--newbatch-require-dwi", action="store_true", default=False,
                    help="keep only newbatch cases that have DWI (the full-3-modality subset, ~219). "
                         "Default off = use all DCE cases (~517), filling missing DWI with background "

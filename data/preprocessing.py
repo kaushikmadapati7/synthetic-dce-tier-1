@@ -33,6 +33,11 @@ class PreprocessConfig:
     # (PI-RADS), so pz_weight>1 emphasizes it. 1.0/1.0 = no zone effect (default).
     tz_weight: float = 1.0
     pz_weight: float = 1.0
+    # focus the fixed-size crop window on the prostate (mask centroid) instead of the
+    # volume center. With a smaller spatial_size (esp. in depth) this concentrates the
+    # model + latent resolution on the gland -- DCE has coarse through-plane coverage
+    # and the VAE downsamples depth, so most non-prostate slices are wasted budget.
+    crop_to_prostate: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -79,13 +84,24 @@ def normalize(arr: np.ndarray, percentiles=(0.5, 99.9),
     return arr * 2.0 - 1.0
 
 
-def center_crop_pad(arr: np.ndarray, size, pad_value=-1.0) -> np.ndarray:
-    """Center crop or pad a (D, H, W) array to exactly `size`."""
+def center_crop_pad(arr: np.ndarray, size, pad_value=-1.0, centers=None) -> np.ndarray:
+    """Crop or pad a (D, H, W) array to exactly `size`.
+
+    Default is a center crop. If `centers` (a per-axis coordinate, e.g. the prostate
+    mask centroid) is given, the crop window is centered on it instead of the volume
+    center, per axis (clamped to stay in-bounds). This focuses a smaller window on
+    the prostate -- important because DCE's coarse through-plane coverage plus the
+    VAE's depth downsampling leave almost no resolution on the gland when most slices
+    are non-prostate FOV."""
     out = np.full(size, pad_value, dtype=arr.dtype)
     src_slices, dst_slices = [], []
-    for a, s in zip(arr.shape, size):
+    for i, (a, s) in enumerate(zip(arr.shape, size)):
+        c = None if centers is None else centers[i]
         if a >= s:
-            start = (a - s) // 2
+            if c is None:
+                start = (a - s) // 2
+            else:
+                start = int(np.clip(int(round(c)) - s // 2, 0, a - s))  # window centered on c
             src_slices.append(slice(start, start + s))
             dst_slices.append(slice(0, s))
         else:
@@ -162,6 +178,11 @@ def process_case(images: dict, cfg: PreprocessConfig,
     (TZ->tz_weight, PZ->pz_weight, else 1.0) is also returned for the ROI loss.
     """
     raw, mask_arr, zones_arr = resample_case(images, cfg, mask, zones)
+    # prostate-centered crop: center the fixed window on the mask centroid (all axes)
+    # so a smaller spatial_size lands on the gland instead of the volume center.
+    centers = None
+    if cfg.crop_to_prostate and mask_arr is not None and (mask_arr > 0.5).any():
+        centers = np.argwhere(mask_arr > 0.5).mean(axis=0)   # (D,H,W) centroid
     out = {}
     for name, arr in raw.items():
         if harmonizer is not None and harmonizer.has(name):
@@ -170,15 +191,15 @@ def process_case(images: dict, cfg: PreprocessConfig,
             hard = cfg.adc_clip_value if name == "adc" else None
             arr = normalize(arr, cfg.clip_percentiles, hard)
         if cfg.spatial_size is not None:
-            arr = center_crop_pad(arr, cfg.spatial_size, cfg.pad_value)
+            arr = center_crop_pad(arr, cfg.spatial_size, cfg.pad_value, centers)
         out[name] = arr
     if mask_arr is not None:
         if cfg.spatial_size is not None:
-            mask_arr = center_crop_pad(mask_arr, cfg.spatial_size, 0.0)
+            mask_arr = center_crop_pad(mask_arr, cfg.spatial_size, 0.0, centers)
         out["mask"] = (mask_arr > 0.5).astype(np.float32)
     if zones_arr is not None:
         if cfg.spatial_size is not None:
-            zones_arr = center_crop_pad(zones_arr, cfg.spatial_size, 0.0)
+            zones_arr = center_crop_pad(zones_arr, cfg.spatial_size, 0.0, centers)
         zl = np.round(zones_arr)
         zw = np.ones_like(zones_arr, dtype=np.float32)
         zw[zl == 1] = cfg.tz_weight        # transition zone
