@@ -102,3 +102,84 @@ class FlowMatching2D(nn.Module):
             v = self.unet(z, tb * self.time_scale, cond)
             z = z + (tn - t) * v
         return z
+
+
+class LatentFlowMatching2D(nn.Module):
+    """2D conditional flow matching in a frozen first-stage latent (e.g. MedVAE-2D).
+
+    Mirrors the 3D LDM flow but per-slice: encode the DCE slice -> CFM on the latent
+    with the bpMRI condition downsampled to the latent grid -> decode. This gives the
+    crispness of 2D (high in-plane res, no depth compression) plus the realism of a
+    data-rich foundation VAE. An optional image-space anchor (decode the predicted
+    clean latent, ROI recon loss through the exact/grad decoder) adds the same direct
+    faithfulness supervision as in 3D. Reuses UNet2D as the velocity net.
+
+    ``first_stage`` exposes the AutoencoderKL3D-style interface (encode->.sample(),
+    decode, decoder, scaling_factor, latent_shift, latent_channels)."""
+
+    def __init__(self, first_stage, cond_ch=3, base=64, time_scale=1000.0):
+        super().__init__()
+        self.first_stage = first_stage
+        self.latent_channels = first_stage.latent_channels
+        self.unet = UNet2D(in_ch=self.latent_channels, cond_ch=cond_ch, base=base)
+        self.time_scale = time_scale
+
+    @torch.no_grad()
+    def encode(self, x):
+        fs = self.first_stage
+        z = fs.encode(x).sample()
+        return (z - fs.latent_shift) * fs.scaling_factor
+
+    def decode(self, z):
+        return self.first_stage.decode(z)
+
+    @staticmethod
+    def _to2d(m):
+        return m.squeeze(2) if (m is not None and m.dim() == 5) else m   # accept (B,1,1,H,W) or (B,1,H,W)
+
+    @staticmethod
+    def _ds(x, hw):
+        return F.interpolate(x, size=hw, mode="bilinear", align_corners=False)
+
+    def loss(self, x1_img, cond, mask=None, roi_weight=1.0,
+             anchor_image=None, anchor_mask=None, anchor_zone_weight=None,
+             anchor_criterion=None, anchor_weight=0.0, anchor_t_max=1.0):
+        with torch.no_grad():
+            z1 = self.encode(x1_img)
+        lat_hw = z1.shape[2:]
+        cond_ds = self._ds(cond, lat_hw)
+        mask2d = self._to2d(mask)
+        mask_ds = self._ds(mask2d, lat_hw) if mask2d is not None else None
+        b = z1.shape[0]
+        t = torch.rand(b, device=z1.device)
+        src = torch.randn_like(z1)
+        tb = t.view(b, 1, 1, 1)
+        zt = (1.0 - tb) * z1 + tb * src
+        v_target = src - z1
+        v_pred = self.unet(zt, t * self.time_scale, cond_ds)
+        loss = roi_weighted_mse(v_pred, v_target, mask_ds, roi_weight)
+
+        if anchor_weight > 0 and anchor_image is not None:
+            lo = t < anchor_t_max                          # anchor only low-noise steps (sharp z0_hat)
+            if lo.any():
+                fs = self.first_stage
+                z0_hat = zt[lo] - tb[lo] * v_pred[lo]      # predicted clean latent
+                img = fs.decoder(z0_hat / fs.scaling_factor + fs.latent_shift)   # grad-enabled decode
+                w5 = lambda x: x.unsqueeze(2) if x is not None else None          # 2D -> (B,1,1,H,W) for the 3D criterion
+                ai = self._to2d(anchor_image)[lo]
+                am = self._to2d(anchor_mask)[lo] if anchor_mask is not None else None
+                azw = self._to2d(anchor_zone_weight)[lo] if anchor_zone_weight is not None else None
+                loss = loss + anchor_weight * anchor_criterion(
+                    w5(img), w5(ai), w5(am), zone_weight=w5(azw))[0]
+        return loss
+
+    @torch.no_grad()
+    def sample(self, cond, steps=50):
+        z = torch.randn_like(self.encode(cond[:, 0:1]))    # probe latent shape, then start from noise
+        cond_ds = self._ds(cond, z.shape[2:])
+        ts = torch.linspace(1.0, 0.0, steps + 1, device=cond.device)
+        for i in range(steps):
+            t, tn = ts[i], ts[i + 1]
+            tb = torch.full((z.shape[0],), float(t), device=cond.device)
+            z = z + (tn - t) * self.unet(z, tb * self.time_scale, cond_ds)
+        return self.decode(z)

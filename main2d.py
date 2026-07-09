@@ -37,6 +37,21 @@ def _w5(t):                       # (B,C,H,W) -> (B,C,1,H,W) so 3D loss/metrics 
     return t.unsqueeze(2) if t is not None else None
 
 
+@torch.no_grad()
+def _fit_scaling_2d(fs, loader, device, n_batches=4):
+    """Latent std -> scaling_factor (~1 std) for a frozen 2D first stage, from a few
+    train targets (2D-slice version of _set_scaling_factor)."""
+    zs = []
+    for i, b in enumerate(loader):
+        zs.append(fs.encode(b["target"].to(device)).sample())
+        if i + 1 >= n_batches:
+            break
+    std = torch.cat(zs).std().item()
+    fs.scaling_factor = 1.0 / (std + 1e-8)
+    fs.latent_shift = 0.0
+    log.info(f"2D latent std={std:.4f} -> scaling_factor={fs.scaling_factor:.4f}")
+
+
 def _slice_loader(loader3d, depth, batch_size, workers, shuffle):
     ds = SliceDCEDataset(loader3d.dataset, depth)
     if len(ds) == 0:
@@ -95,9 +110,22 @@ def main():
 
     criterion = make_criterion(args, device)
     is_flow = args.model != "gan"
+    is_latent = is_flow and getattr(args, "first_stage", "vae") == "medvae"
     name = "flow2d" if is_flow else "gan2d"
 
-    if is_flow:                                   # pixel-space 2D CFM
+    if is_latent:                                 # 2D MedVAE-latent CFM (crisp + foundation VAE)
+        from .models import MedVAEFirstStage
+        from .models.flow2d import LatentFlowMatching2D
+        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_3_2d"),
+                              modality=getattr(args, "medvae_modality", "mri")).to(device)
+        _fit_scaling_2d(fs, train, device)
+        model = LatentFlowMatching2D(fs, cond_ch=3, base=args.base_ch).to(device)
+        opt = torch.optim.Adam(model.unet.parameters(), lr=args.lr)
+        gen = lambda c: model.sample(c, steps=args.sample_steps).clamp(-1, 1)
+        log.info(f"2D MedVAE-latent flow: {fs.model_name} latent_ch={fs.latent_channels}, "
+                 f"UNet {sum(p.numel() for p in model.unet.parameters())/1e6:.1f}M "
+                 f"(anchor_weight={getattr(args, 'anchor_weight', 0.0)})")
+    elif is_flow:                                 # pixel-space 2D CFM
         model = FlowMatching2D(cond_ch=3, base=args.base_ch,
                                source=getattr(args, "flow_source", "noise")).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -118,7 +146,15 @@ def main():
         for b in train:
             cond = b["cond"].to(device); real = b["target"].to(device); mask = b["mask"].to(device)
             zw = b["zone_weight"].to(device) if "zone_weight" in b else None
-            if is_flow:
+            if is_latent:                         # MedVAE-latent flow (+ optional image-space anchor)
+                loss = model.loss(real, cond, mask=mask, roi_weight=args.roi_weight,
+                                  anchor_image=real, anchor_mask=mask, anchor_zone_weight=zw,
+                                  anchor_criterion=criterion,
+                                  anchor_weight=getattr(args, "anchor_weight", 0.0),
+                                  anchor_t_max=getattr(args, "anchor_t_max", 1.0))
+                opt.zero_grad(); loss.backward(); opt.step()
+                agg["diff"] = agg.get("diff", 0.0) + float(loss.detach())
+            elif is_flow:
                 loss = model.loss(real, cond, mask=_w5(mask), roi_weight=args.roi_weight)
                 opt.zero_grad(); loss.backward(); opt.step()
                 agg["diff"] = agg.get("diff", 0.0) + float(loss.detach())
