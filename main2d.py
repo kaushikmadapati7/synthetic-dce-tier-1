@@ -26,8 +26,9 @@ from .models import d_hinge_loss, g_hinge_loss
 from .models.gan2d import Generator2D, PatchDiscriminator2D
 from .models.flow2d import FlowMatching2D
 from .data.slice_dataset import SliceDCEDataset
-from .metrics import eval_metrics, aggregate, roi_p75, pearson
-from .eval import save_samples
+from .metrics import (eval_metrics, aggregate, roi_p75, pearson, compute_fid,
+                      selection_score)
+from .eval import save_samples, _log_realism
 
 log = logging.getLogger("tier1")
 
@@ -45,10 +46,11 @@ def _slice_loader(loader3d, depth, batch_size, workers, shuffle):
 
 
 @torch.no_grad()
-def evaluate2d(gen, loader, device, tag):
+def evaluate2d(gen, loader, device, tag, compute_fid_flag=True):
     if loader is None:
         return {}, None
     per, p75r, p75p, first = [], [], [], None
+    all_preds, all_targets = [], []          # each 2D slice (1,H,W) is one FID sample
     for b in loader:
         cond = b["cond"].to(device); target = b["target"].to(device); mask = b["mask"].to(device)
         zones = b["zones"].to(device) if "zones" in b else None
@@ -58,13 +60,20 @@ def evaluate2d(gen, loader, device, tag):
             rr = roi_p75(_w5(target[i:i+1]), _w5(mask[i:i+1])); pp = roi_p75(_w5(pred[i:i+1]), _w5(mask[i:i+1]))
             if rr is not None and pp is not None:
                 p75r.append(rr); p75p.append(pp)
+            if compute_fid_flag:
+                all_preds.append(pred[i].cpu()); all_targets.append(target[i].cpu())
         if first is None:
             first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), b["id"][0])
     m = aggregate(per)
     pc = pearson(p75r, p75p)
     if pc is not None:
         m["p75_corr"] = pc
+    if compute_fid_flag and all_preds:       # FID over the 2D slice distribution (native to 2D)
+        fid = compute_fid(all_preds, all_targets, device, slices_per_volume=1, batch_size=32)
+        if fid is not None:
+            m["fid"] = fid
     log.info(f"{tag} metrics: {json.dumps({k: round(v, 4) for k, v in m.items()})}")
+    _log_realism(m, tag)
     return m, first
 
 
@@ -129,8 +138,8 @@ def main():
 
         if val is not None and ((epoch + 1) % args.ckpt_every == 0 or epoch + 1 == args.epochs):
             model.eval()
-            m, _ = evaluate2d(gen, val, device, "VAL")
-            score = m.get("ssim_roi", m.get("ssim", float("-inf")))
+            m, _ = evaluate2d(gen, val, device, "VAL", compute_fid_flag=False)  # FID is slow; skip during selection
+            score = selection_score(m, getattr(args, "select_metric", "ssim_roi"))
             if score > best:
                 best = score
                 torch.save(model.state_dict(), out / f"{name}_best.pt")
@@ -141,8 +150,9 @@ def main():
     if (out / f"{name}_best.pt").exists():
         model.load_state_dict(torch.load(out / f"{name}_best.pt", map_location=device))
     model.eval()
-    evaluate2d(gen, test, device, "TEST")
-    _, first = evaluate2d(gen, val, device, "VAL")
+    fid_flag = getattr(args, "compute_fid", True)
+    evaluate2d(gen, test, device, "TEST", compute_fid_flag=fid_flag)
+    _, first = evaluate2d(gen, val, device, "VAL", compute_fid_flag=fid_flag)
     if first is not None:
         cond, target, pred, mask, cid = first
         save_samples(out / "samples", _w5(cond), _w5(target), _w5(pred), _w5(mask),

@@ -79,7 +79,10 @@ def roi_sharpness(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
         return {}
     def gmag(v):
         v = v.float()
-        gs = torch.gradient(v, dim=(-3, -2, -1))
+        dims = tuple(d for d in (-3, -2, -1) if v.shape[d] >= 2)  # skip singleton (2D: depth=1)
+        gs = torch.gradient(v, dim=dims)
+        if not isinstance(gs, (list, tuple)):
+            gs = (gs,)
         return torch.sqrt(sum(g ** 2 for g in gs) + 1e-12)
     gp, gt = gmag(pred), gmag(target)
     mp, mt = gp[m].mean(), gt[m].mean()
