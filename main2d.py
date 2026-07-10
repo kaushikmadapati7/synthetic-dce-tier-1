@@ -141,7 +141,7 @@ def main():
                  f"D={sum(p.numel() for p in disc.parameters())/1e6:.1f}M")
 
     best = float("-inf")
-    for epoch in range(args.epochs):
+    for epoch in range(0 if getattr(args, "eval_only", False) else args.epochs):
         model.train(); t0 = time.time(); agg = {}
         for b in train:
             cond = b["cond"].to(device); real = b["target"].to(device); mask = b["mask"].to(device)
@@ -181,9 +181,10 @@ def main():
                 torch.save(model.state_dict(), out / f"{name}_best.pt")
                 sel = getattr(args, "select_metric", "ssim_roi")
                 log.info(f"  ** new best 2D {name}: val[{sel}]={score:.4f} -> {name}_best.pt")
-    torch.save(model.state_dict(), out / f"{name}_last.pt")
+    if not getattr(args, "eval_only", False):        # don't clobber the trained ckpt in eval-only
+        torch.save(model.state_dict(), out / f"{name}_last.pt")
 
-    # final: load best, eval test + val, save an in-distribution montage
+    # final: load best, eval test + val, save an in-distribution montage (FID computed here)
     if (out / f"{name}_best.pt").exists():
         model.load_state_dict(torch.load(out / f"{name}_best.pt", map_location=device))
     model.eval()
