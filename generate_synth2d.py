@@ -107,7 +107,7 @@ def main():
         for batch in loader:
             for i, cid in enumerate(batch["id"]):
                 dst = synth_out / cid / "synth_DCE.nii.gz"
-                if dst.exists():                       # resumable
+                if dst.exists() and (dst.parent / "target_DCE.nii.gz").exists():  # resumable
                     skipped += 1
                     continue
                 # (3,D,H,W) -> (D,3,H,W): D slices as one batch through the 2D model
@@ -122,6 +122,13 @@ def main():
                 img.CopyInformation(ref)               # native DCE geometry
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 sitk.WriteImage(img, str(dst))
+                # matched preprocessed target in the SAME [-1,1] space + geometry, so
+                # synth-vs-target intensities are directly comparable (the raw DCE on
+                # disk is in scanner units and is NOT apples-to-apples with the synth)
+                tvol = uncrop_pad(batch["target"][i, 0].cpu().numpy(), native, pad_value=-1.0)
+                timg = sitk.GetImageFromArray(tvol.astype(np.float32))
+                timg.CopyInformation(ref)
+                sitk.WriteImage(timg, str(dst.parent / "target_DCE.nii.gz"))
                 n += 1
                 if n % 20 == 0:
                     log.info(f"  wrote {n} synth_DCE volumes ({skipped} skipped)")
