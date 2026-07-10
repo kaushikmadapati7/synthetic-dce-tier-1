@@ -116,7 +116,7 @@ def main():
     if is_latent:                                 # 2D MedVAE-latent CFM (crisp + foundation VAE)
         from .models import MedVAEFirstStage
         from .models.flow2d import LatentFlowMatching2D
-        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_3_2d"),
+        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_2d"),
                               modality=getattr(args, "medvae_modality", "mri")).to(device)
         _fit_scaling_2d(fs, train, device)
         model = LatentFlowMatching2D(fs, cond_ch=3, base=args.base_ch).to(device)
