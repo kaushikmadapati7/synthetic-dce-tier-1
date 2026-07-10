@@ -113,6 +113,17 @@ def main():
     is_latent = is_flow and getattr(args, "first_stage", "vae") == "medvae"
     name = "flow2d" if is_flow else "gan2d"
 
+    if getattr(args, "eval_only", False):         # match --base-ch to the trained ckpt width
+        ck = out / f"{name}_best.pt"
+        if not ck.exists():
+            ck = out / f"{name}_last.pt"
+        if ck.exists():
+            sd = torch.load(ck, map_location="cpu", weights_only=True)
+            key = "unet.cin.weight" if is_flow else "d1.0.weight"
+            if key in sd:
+                args.base_ch = int(sd[key].shape[0])
+                log.info(f"eval-only: inferred base_ch={args.base_ch} from {ck.name}")
+
     if is_latent:                                 # 2D MedVAE-latent CFM (crisp + foundation VAE)
         from .models import MedVAEFirstStage
         from .models.flow2d import LatentFlowMatching2D
