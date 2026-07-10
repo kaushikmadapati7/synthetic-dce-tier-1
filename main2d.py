@@ -179,7 +179,8 @@ def main():
             if score > best:
                 best = score
                 torch.save(model.state_dict(), out / f"{name}_best.pt")
-                log.info(f"  ** new best 2D {name}: val_ssim_roi={score:.4f} -> {name}_best.pt")
+                sel = getattr(args, "select_metric", "ssim_roi")
+                log.info(f"  ** new best 2D {name}: val[{sel}]={score:.4f} -> {name}_best.pt")
     torch.save(model.state_dict(), out / f"{name}_last.pt")
 
     # final: load best, eval test + val, save an in-distribution montage
