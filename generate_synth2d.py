@@ -55,6 +55,13 @@ def _build_gen(args, train_loader, device):
     is_latent = is_flow and getattr(args, "first_stage", "vae") == "medvae"
     name = "flow2d" if is_flow else "gan2d"
 
+    ckpt = out / f"{name}_best.pt"
+    if not ckpt.exists():
+        ckpt = out / f"{name}_last.pt"
+    sd = torch.load(ckpt, map_location=device, weights_only=True)
+    # infer base channels from the checkpoint so we don't depend on --base-ch matching
+    base = int(sd["unet.cin.weight"].shape[0] if is_flow else sd["d1.0.weight"].shape[0])
+
     if is_latent:
         from .models import MedVAEFirstStage
         fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_2d"),
@@ -62,19 +69,16 @@ def _build_gen(args, train_loader, device):
         sl = DataLoader(SliceDCEDataset(train_loader.dataset, args.spatial_size[0]),
                         batch_size=args.batch_size)
         _fit_scaling_2d(fs, sl, device)                # scaling_factor isn't in the ckpt
-        model = LatentFlowMatching2D(fs, cond_ch=3, base=args.base_ch).to(device)
+        model = LatentFlowMatching2D(fs, cond_ch=3, base=base).to(device)
     elif is_flow:
-        model = FlowMatching2D(cond_ch=3, base=args.base_ch,
+        model = FlowMatching2D(cond_ch=3, base=base,
                                source=getattr(args, "flow_source", "noise")).to(device)
     else:
-        model = Generator2D(in_ch=3, out_ch=1, base=args.base_ch).to(device)
+        model = Generator2D(in_ch=3, out_ch=1, base=base).to(device)
 
-    ckpt = out / f"{name}_best.pt"
-    if not ckpt.exists():
-        ckpt = out / f"{name}_last.pt"
-    model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+    model.load_state_dict(sd)
     model.eval()
-    log.info(f"loaded 2D {name} from {ckpt}")
+    log.info(f"loaded 2D {name} (base={base}) from {ckpt}")
 
     steps = args.sample_steps
     if is_flow:
