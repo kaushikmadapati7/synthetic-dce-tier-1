@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=tier1_dce
 #SBATCH --partition=pod
+#SBATCH --account=ucsf_pod
 #SBATCH --qos=pod
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
