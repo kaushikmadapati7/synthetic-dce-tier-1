@@ -44,6 +44,10 @@ def _dce_ref(data_root, image_subdir, case_id):
     center, subject = case_id.split("/", 1)
     d = Path(data_root) / image_subdir / center / subject
     p = _resolve_stem(d, MODALITY_STEMS["dce"])
+    if p is None:                      # multi-phase (zhongyiyuan): DCE_ph*_to_T2W, not DCE_to_T2WI
+        cands = sorted(d.glob("DCE*_to_T2W*.nii.gz")) or sorted(d.glob("DCE*.nii.gz"))
+        # prefer ph3 (what the downstream classifier uses as zhongyiyuan's real DCE)
+        p = next((c for c in cands if "ph3" in c.name), cands[0] if cands else None)
     return load_sitk(p) if p else None
 
 
