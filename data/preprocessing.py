@@ -47,6 +47,23 @@ def load_sitk(path) -> sitk.Image:
     return sitk.ReadImage(str(path), sitk.sitkFloat32)
 
 
+def load_sitk_4d(path) -> sitk.Image:
+    """Read a 4D series without forcing a scalar pixel type (keeps the t axis)."""
+    return sitk.ReadImage(str(path))
+
+
+def extract_phase_from_4d(img4d: sitk.Image, idx: int) -> sitk.Image:
+    """Extract 3D phase `idx` from a 4D DCE series as a float32 image with the 3
+    spatial axes' geometry preserved. Accepts a 4D image (x,y,z,t); if a 3D image
+    is passed (already single-phase), it is returned as-is."""
+    if img4d.GetDimension() < 4:
+        return sitk.Cast(img4d, sitk.sitkFloat32)
+    n = img4d.GetSize()[3]
+    idx = max(0, min(int(idx), n - 1))
+    phase = img4d[:, :, :, idx]                    # int index collapses the t axis -> 3D
+    return sitk.Cast(phase, sitk.sitkFloat32)
+
+
 def make_iso_reference(img: sitk.Image, spacing) -> sitk.Image:
     """A blank reference image at `spacing` covering the same physical extent."""
     old_spacing = np.array(img.GetSpacing())

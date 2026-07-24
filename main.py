@@ -28,7 +28,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from .data import (PreprocessConfig, Harmonizer, HarmonizationConfig,
-                   build_tier1_datasets, CanonicalDCEDataset, NewbatchDCEDataset,
+                   build_tier1_datasets, build_ucsf_datasets, CanonicalDCEDataset,
+                   NewbatchDCEDataset, UCSFDCEDataset,
                    fit_harmonizer_from_dataset, CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
 from .training import TRAINERS, LOADERS
@@ -109,6 +110,8 @@ def build_data(args):
                            tz_weight=args.tz_weight, pz_weight=args.pz_weight,
                            crop_to_prostate=getattr(args, "crop_to_prostate", False))
     out = Path(args.output_dir)
+    if getattr(args, "ucsf_main_root", ""):
+        return _build_data_ucsf(args, cfg, out)
     layout = dict(image_subdir=args.image_subdir, mask_subdir=args.mask_subdir)
     test_hospitals = args.test_hospitals
 
@@ -181,6 +184,66 @@ def build_data(args):
             (dl(test, False) if len(test) else None))
 
 
+def _build_data_ucsf(args, cfg, out):
+    """UCSF single-center path for build_data: two fac mounts, patient-level split."""
+    harmonizer = None
+    if args.harmonize:
+        saved = out / "harmonizer.json"
+        if args.eval_only and saved.exists():
+            harmonizer = Harmonizer.load(saved)
+            log.info(f"eval-only: loaded harmonizer {saved} (skipping re-fit)")
+        else:
+            hcfg = HarmonizationConfig()
+            hcfg.methods = dict(hcfg.methods, t2w=args.t2w_norm, dce=args.dce_norm)
+            hcfg.dce_robust_k = args.dce_robust_k
+            harmonizer = Harmonizer(hcfg)
+            if harmonizer.nyul_modalities:
+                fit_ds = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root, cfg,
+                                        target_time=args.dce_target_time,
+                                        dwi_bvalue=args.dwi_bvalue)
+                if len(fit_ds):
+                    log.info(f"fitting Nyul {harmonizer.nyul_modalities} on "
+                             f"{min(len(fit_ds), args.harmonize_max)} UCSF cases ...")
+                    fit_harmonizer_from_dataset(harmonizer, fit_ds, max_cases=args.harmonize_max)
+                    harmonizer.save(saved)
+                else:
+                    log.warning("no UCSF cases to fit harmonizer; disabling harmonization")
+                    harmonizer = None
+            else:
+                log.info(f"harmonizer all per-image ({harmonizer.cfg.methods}); no Nyul fit needed")
+                harmonizer.save(saved)
+
+    kw = dict(target_time=args.dce_target_time, dwi_bvalue=args.dwi_bvalue,
+              test_frac=args.ucsf_test_frac, seed=args.seed)
+    train = build_ucsf_datasets(args.ucsf_main_root, args.ucsf_dce_root, cfg, "train",
+                                harmonizer, **kw)
+    test = build_ucsf_datasets(args.ucsf_main_root, args.ucsf_dce_root, cfg, "test",
+                               harmonizer, **kw)
+    if len(train) == 0:
+        log.error(f"UCSF train split is EMPTY under main-root={args.ucsf_main_root} / "
+                  f"dce-root={args.ucsf_dce_root}. Check paths / DCE transfer status.")
+    if args.limit:
+        train = torch.utils.data.Subset(train, range(min(args.limit, len(train))))
+        test = torch.utils.data.Subset(test, range(min(max(1, args.limit // 4), len(test))))
+
+    val = None
+    if args.val_frac and len(train) >= 4:
+        n_val = max(1, int(round(len(train) * args.val_frac)))
+        n_train = len(train) - n_val
+        if n_train >= 1 and n_val >= 1:
+            g = torch.Generator().manual_seed(args.seed)
+            train, val = torch.utils.data.random_split(train, [n_train, n_val], generator=g)
+    log.info(f"[ucsf] train cases: {len(train)}  val cases: {len(val) if val else 0}  "
+             f"test cases: {len(test)}")
+
+    dl = lambda ds, shuf: DataLoader(ds, batch_size=args.batch_size, shuffle=shuf,
+                                     num_workers=args.num_workers, drop_last=shuf,
+                                     pin_memory=torch.cuda.is_available())
+    return (dl(train, True),
+            (dl(val, False) if val else None),
+            (dl(test, False) if len(test) else None))
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -220,7 +283,8 @@ def main():
 def parse_args():
     p = argparse.ArgumentParser(description="Tier-1 synthetic DCE pipeline")
     p.add_argument("--model", choices=list(TRAINERS), default="ldm_flow")
-    p.add_argument("--data-root", required=True)
+    p.add_argument("--data-root", default="",
+                   help="Bao silver data root; not needed when --ucsf-main-root is set")
     p.add_argument("--output-dir", default="runs/exp")
     # data / geometry
     p.add_argument("--spatial-size", type=int, nargs=3, default=[32, 192, 192])
@@ -265,6 +329,22 @@ def parse_args():
                    help="keep only newbatch cases that have DWI (the full-3-modality subset, ~219). "
                         "Default off = use all DCE cases (~517), filling missing DWI with background "
                         "(pair with --modality-dropout for a principled missing-DWI signal)")
+    # UCSF cohort (single center, two fac mounts; 4D DCE + per-phase acq times).
+    # When --ucsf-main-root is set, build_data uses the UCSF path (patient-level split)
+    # instead of the Bao silver layout, ignoring --data-root/--test-hospitals.
+    p.add_argument("--ucsf-main-root", default="",
+                   help="UCSF DS2 registered tree (<pid>/ with T2W, DWI_b*, ADC, masks). "
+                        "Empty = off (use the Bao --data-root path)")
+    p.add_argument("--ucsf-dce-root", default="",
+                   help="UCSF DS3 registered tree (<pid>/DCE/ with DCE_4D_to_T2W + dce_times.json)")
+    p.add_argument("--dce-target-time", type=float, default=60.0,
+                   help="target acquisition time (s post pre-contrast) for the UCSF DCE peak phase; "
+                        "the 4D phase with the closest valid rel_time_s is used")
+    p.add_argument("--dwi-bvalue", default="",
+                   help="preferred UCSF DWI b-value for the DWI channel (e.g. 1000); "
+                        "empty/'auto' = highest available (b1000 -> b0600 -> ...)")
+    p.add_argument("--ucsf-test-frac", type=float, default=0.15,
+                   help="fraction of UCSF patients held out as the test split (patient-level, by --seed)")
     # training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--vae-epochs", type=int, default=50)

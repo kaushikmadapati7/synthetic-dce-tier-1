@@ -40,8 +40,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, ConcatDataset
 
-from .preprocessing import (PreprocessConfig, load_sitk, process_case,
-                            resample_case, peak_phase_index, select_phase_by_time)
+from .preprocessing import (PreprocessConfig, load_sitk, load_sitk_4d,
+                            extract_phase_from_4d, process_case, resample_case,
+                            peak_phase_index, select_phase_by_time)
 
 log = logging.getLogger("tier1")
 
@@ -393,6 +394,124 @@ class NewbatchDCEDataset(Dataset):
 
 
 # ---------------------------------------------------------------------------
+# UCSF cohort (two fac mounts; 4D DCE + pregad with per-phase acquisition times)
+# ---------------------------------------------------------------------------
+# T2W/DWI/ADC/masks live on DS2; the 4D DCE (+ pregad) lives on DS3 under DCE/.
+UCSF_STEMS = {
+    "t2w": ["T2W"],
+    "adc": ["ADC_to_T2W", "ADC"],
+    # high-b DWI first (diffusion contrast), then fall back through the other b-values
+    "dwi": ["DWI_b1000_to_T2W", "DWI_b0600_to_T2W", "DWI_b600_to_T2W",
+            "DWI_b0000_to_T2W", "DWI_to_T2W"],
+}
+
+
+def _ucsf_dwi_stems(bvalue):
+    """DWI stem search order, preferring an explicit b-value when given."""
+    if bvalue in (None, "", "auto"):
+        return UCSF_STEMS["dwi"]
+    b = str(bvalue).lstrip("b")
+    return [f"DWI_b{b}_to_T2W", f"DWI_b0{b}_to_T2W"] + UCSF_STEMS["dwi"]
+
+
+class UCSFDCEDataset(Dataset):
+    """UCSF prostate cohort, split across two fac mounts:
+
+        <main_root>/<pid>/       T2W, ADC_to_T2W, DWI_b*_to_T2W, prostate_mask,
+                                 prostate_zones                              (DS2)
+        <dce_root>/<pid>/DCE/    DCE_4D_to_T2W.nii.gz + dce_times.json,
+                                 pregad_4D_to_T2W.nii.gz + pregad_times.json (DS3)
+
+    The target is a single DCE phase extracted from the 4D series by ACQUISITION
+    TIME (`select_phase_by_time` with `target_time`) -- now that we have real per-
+    phase timing, a reproducible peak phase is defined by time instead of the noisy
+    intensity-argmax peak-contrast detection. The DCE tree lags the anatomical scans
+    (still transferring), so only patients present in BOTH trees are kept; the rest
+    are counted and skipped, so the loader works out-of-the-box as DCE fills in.
+    (pregad is available on disk for a future pre-contrast channel / residual target.)
+    """
+
+    def __init__(self, main_root, dce_root, cfg: PreprocessConfig | None = None,
+                 harmonizer=None, subject_glob="*", target_time: float = 60.0,
+                 t_max: float = 600.0, dwi_bvalue: str | None = None, pids=None):
+        self.main_root = Path(main_root)
+        self.dce_root = Path(dce_root)
+        self.cfg = cfg or PreprocessConfig()
+        self.harmonizer = harmonizer
+        self.target_time = target_time
+        self.t_max = t_max
+        self.dwi_stems = _ucsf_dwi_stems(dwi_bvalue)
+        keep = set(pids) if pids is not None else None
+        self.samples = []
+        found = skipped = no_dce = 0
+        for subj in sorted(self.main_root.glob(subject_glob)):
+            if not subj.is_dir():
+                continue
+            pid = subj.name
+            if keep is not None and pid not in keep:
+                continue
+            t2 = _resolve_stem(subj, UCSF_STEMS["t2w"])
+            adc = _resolve_stem(subj, UCSF_STEMS["adc"])
+            dwi = _resolve_stem(subj, self.dwi_stems)
+            mask = subj / "prostate_mask.nii.gz"
+            dce_dir = self.dce_root / pid / "DCE"
+            dce4d = dce_dir / "DCE_4D_to_T2W.nii.gz"
+            times = dce_dir / "dce_times.json"
+            if not (t2 and adc and dwi and mask.exists()):
+                skipped += 1
+                continue
+            if not (dce4d.exists() and times.exists()):
+                no_dce += 1                        # anatomy present, DCE not transferred yet
+                continue
+            self.samples.append((pid, subj, dce_dir))
+            found += 1
+        log.info(f"[ucsf] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE) "
+                 f"under {self.main_root} | target_time={target_time}s dwi={dwi_bvalue or 'auto'}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    @property
+    def pids(self):
+        return [s[0] for s in self.samples]
+
+    def _select_dce_phase(self, dce_dir: Path):
+        """Time-selected 3D DCE phase from the 4D series (peak phase by acq time)."""
+        meta = json.loads((dce_dir / "dce_times.json").read_text())
+        phases = meta["phases"] if isinstance(meta, dict) and "phases" in meta else meta
+        pt = [(p.get("idx", j), p.get("rel_time_s", p.get("rel_time")))
+              for j, p in enumerate(phases)]
+        idx = select_phase_by_time(pt, self.target_time, self.t_max)
+        if idx is None:                            # no valid timing -> middle phase
+            idx = pt[len(pt) // 2][0] if pt else 0
+        img4d = load_sitk_4d(dce_dir / "DCE_4D_to_T2W.nii.gz")
+        return extract_phase_from_4d(img4d, idx)
+
+    def _load_images(self, i):
+        pid, subj, dce_dir = self.samples[i]
+        paths = {"t2w": _resolve_stem(subj, UCSF_STEMS["t2w"]),
+                 "adc": _resolve_stem(subj, UCSF_STEMS["adc"]),
+                 "dwi": _resolve_stem(subj, self.dwi_stems)}
+        images = {k: load_sitk(p) for k, p in paths.items()}
+        images[DCE_KEY] = self._select_dce_phase(dce_dir)
+        mask_path = subj / "prostate_mask.nii.gz"
+        zones_path = subj / "prostate_zones.nii.gz"
+        mask = load_sitk(mask_path) if mask_path.exists() else None
+        zones = load_sitk(zones_path) if zones_path.exists() else None
+        return pid, images, mask, zones
+
+    def __getitem__(self, i):
+        case_id, images, mask, zones = self._load_images(i)
+        arrays = process_case(images, self.cfg, mask, self.harmonizer, zones=zones)
+        return _stack_sample(arrays, case_id, self.cfg.spatial_size)
+
+    def raw_modalities(self, i) -> dict:
+        _, images, mask, _ = self._load_images(i)
+        raw, _, _ = resample_case(images, self.cfg, mask)
+        return raw
+
+
+# ---------------------------------------------------------------------------
 # Tier-1 convenience builder
 # ---------------------------------------------------------------------------
 class _EmptyDataset(Dataset):
@@ -445,3 +564,32 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
                                         target_time=newbatch_target_time,
                                         require_dwi=newbatch_require_dwi))
     return ConcatDataset(parts) if parts else _EmptyDataset()
+
+
+def build_ucsf_datasets(main_root, dce_root, cfg: PreprocessConfig | None = None,
+                        split="train", harmonizer=None, target_time=60.0,
+                        dwi_bvalue=None, test_frac=0.15, seed=0, subject_glob="*"):
+    """UCSF single-center cohort with a deterministic patient-level train/test split.
+
+    UCSF is one site, so there is no held-out *hospital*; instead a fixed fraction of
+    patients (`test_frac`, by `seed`) is held out as the test set. The split is over
+    the patients that currently have BOTH anatomy and DCE, so it stays stable-ish as
+    DCE transfers in (new patients extend the pool; existing membership is by shuffle
+    order over the sorted, present pids). Returns a torch Subset (or empty dataset).
+    """
+    full = UCSFDCEDataset(main_root, dce_root, cfg, harmonizer, subject_glob=subject_glob,
+                          target_time=target_time, dwi_bvalue=dwi_bvalue)
+    n = len(full)
+    if n == 0:
+        return _EmptyDataset()
+    order = list(range(n))
+    np.random.default_rng(seed).shuffle(order)
+    n_test = max(1, int(round(test_frac * n)))
+    test_idx = set(order[:n_test])
+    if split == "train":
+        keep = [i for i in range(n) if i not in test_idx]
+    elif split == "test":
+        keep = [i for i in range(n) if i in test_idx]
+    else:
+        keep = list(range(n))
+    return torch.utils.data.Subset(full, keep) if keep else _EmptyDataset()
