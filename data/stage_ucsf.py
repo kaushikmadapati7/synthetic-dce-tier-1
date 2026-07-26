@@ -149,6 +149,8 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     # filter on the MAX over the series: only that separates "never enhanced" from
     # "we picked the wrong phase" (e.g. interleaved sub-series).
     if min_enh and enh_max is not None and enh_max < min_enh:
+        if dst.exists():          # previously staged under a looser threshold -> remove,
+            shutil.rmtree(dst)    # else the loader would keep picking up a rejected case
         return {"pid": pid, "skip": f"no enhancement (max {enh_max:.2f})",
                 "enh_ratio": enh, "enh_max": enh_max}
 
@@ -201,11 +203,15 @@ def main(argv=None):
     p.add_argument("--report", action="store_true",
                    help="don't stage; scan <out>/*/stage_meta.json and print the aggregate "
                         "summary (use after a sharded array job finishes)")
+    p.add_argument("--prune-below", type=float, default=0.0,
+                   help="with --report: DELETE already-staged cases whose max enhancement is "
+                        "below this (no 4D re-read needed). Use after inspecting the summary, "
+                        "e.g. --report --prune-below 1.4")
     a = p.parse_args(argv)
 
     out = Path(a.out)
     if a.report:
-        return _report(out)
+        return _report(out, a.prune_below)
     if not (a.main_root and a.dce_root):
         p.error("--main-root and --dce-root are required unless --report")
 
@@ -293,8 +299,9 @@ def _stats(ok, skipped=()):
               f"stacks >1 volume per timepoint (e.g. Dixon water/fat)")
 
 
-def _report(out: Path):
-    """Aggregate every per-patient stage_meta.json under `out` (post-array summary)."""
+def _report(out: Path, prune_below: float = 0.0):
+    """Aggregate every per-patient stage_meta.json under `out` (post-array summary).
+    With `prune_below`, delete staged cases whose max enhancement is under it."""
     recs = []
     for m in sorted(out.glob("*/stage_meta.json")):
         try:
@@ -302,6 +309,20 @@ def _report(out: Path):
         except Exception:
             print(f"  unreadable: {m}")
     print(f"staged patients under {out}: {len(recs)}")
+
+    if prune_below:
+        def _emax(r):                       # pre-QC-fix records have no enh_max
+            return r.get("enh_max") if r.get("enh_max") is not None else r.get("enh_ratio")
+        drop = [r for r in recs if _emax(r) is not None and _emax(r) < prune_below]
+        stale = [r for r in recs if _emax(r) is None]
+        for r in drop:
+            shutil.rmtree(out / r["pid"], ignore_errors=True)
+        recs = [r for r in recs if r not in drop]
+        print(f"  pruned {len(drop)} case(s) with max enhancement < {prune_below} "
+              f"-> {len(recs)} remain")
+        if stale:
+            print(f"  NOTE {len(stale)} case(s) predate the QC fix (no enh_max) and were "
+                  f"NOT evaluated; re-stage with --overwrite to score them")
     _stats(recs)
     (out / "stage_summary.json").write_text(json.dumps(
         {"n_ok": len(recs), "records": sorted(recs, key=lambda r: r["pid"])}, indent=1))
