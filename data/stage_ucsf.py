@@ -51,6 +51,25 @@ from .preprocessing import extract_phase_from_4d, load_sitk_4d
 # copied verbatim (mask/zones are labels; anatomy is already registered to T2W)
 COPY_FILES = ["prostate_mask.nii.gz", "prostate_zones.nii.gz"]
 
+# sweep the full enhancement curve only when the selected phase looks weak
+SWEEP_BELOW = 1.5
+
+
+def _interleave_factor(dce_dir):
+    """How many sub-series are interleaved in the 4D, inferred from repeated
+    timestamps. Some UCSF studies stack e.g. Dixon water/fat or two echoes, so the
+    4D holds k volumes per timepoint (n_phases = k * n_timepoints) and a plain index
+    alternates between sub-series -- one of which barely enhances. Returns k (1 =
+    a normal single series)."""
+    try:
+        meta = json.loads((Path(dce_dir) / "dce_times.json").read_text())
+        phases = meta["phases"] if isinstance(meta, dict) and "phases" in meta else meta
+        ts = [p.get("rel_time_s") for p in phases]
+        uniq = len({t for t in ts if t is not None})
+        return max(1, round(len(ts) / uniq)) if uniq else 1
+    except Exception:
+        return 1
+
 
 def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue,
               min_enh=0.0, overwrite=False):
@@ -72,24 +91,66 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
         return {"pid": pid, "skip": "no DCE"}
 
     idx, t_sel = ucsf_phase_index(dce_dir, target_time, t_max)
+    interleave = _interleave_factor(dce_dir)
     img4d = load_sitk_4d(dce_dir / "DCE_4D_to_T2W.nii.gz")
     n_phases = img4d.GetSize()[3] if img4d.GetDimension() > 3 else 1
-    phase = extract_phase_from_4d(img4d, idx)
 
-    # QC: mask-mean enhancement of the chosen phase vs pre-contrast (phase 0)
-    enh = None
+    m = None
     try:
-        m = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_p))) > 0
-        sel = sitk.GetArrayFromImage(phase)
-        if m.shape == sel.shape and m.any():
-            pre = sitk.GetArrayFromImage(extract_phase_from_4d(img4d, 0))
-            base = float(pre[m].mean())
-            enh = float(sel[m].mean() / base) if abs(base) > 1e-6 else None
+        mm = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_p))) > 0
+        probe = sitk.GetArrayFromImage(extract_phase_from_4d(img4d, 0))
+        m = mm if (mm.shape == probe.shape and mm.any()) else None
     except Exception:
         pass
+
+    def _mean(j):
+        return float(sitk.GetArrayFromImage(extract_phase_from_4d(img4d, j))[m].mean())
+
+    # Interleaved 4D (k volumes per timepoint, e.g. Dixon water/fat): a plain index
+    # alternates between sub-series and can land on the one that barely enhances.
+    # Re-pick within the selected timepoint, keeping the sub-series that actually
+    # enhances (each scored against its OWN t=0 volume).
+    sub = None
+    if interleave > 1 and m is not None and n_phases > interleave:
+        grp = idx - (idx % interleave)
+        best, best_e = idx, -1.0
+        for s in range(interleave):
+            j = grp + s
+            if j >= n_phases:
+                continue
+            b = _mean(s)
+            e = _mean(j) / b if abs(b) > 1e-6 else 0.0
+            if e > best_e:
+                best, best_e, sub = j, e, s
+        idx = best
+
+    phase = extract_phase_from_4d(img4d, idx)
+
+    # QC: mask-mean enhancement of the chosen phase vs its sub-series pre-contrast.
+    # If that looks low, sweep the WHOLE series for the max -- a low selected-phase
+    # value can mean either a genuinely non-enhancing study (max also ~1.0 -> drop)
+    # or a mis-selected phase (max is high -> keep and fix selection), and only the
+    # max distinguishes them. The sweep is skipped on the healthy majority.
+    enh = enh_max = enh_max_idx = None
+    if m is not None:
+        try:
+            base = _mean(idx % interleave if interleave > 1 else 0)
+            if abs(base) > 1e-6:
+                enh = float(sitk.GetArrayFromImage(phase)[m].mean() / base)
+                if enh < SWEEP_BELOW and n_phases > 1:
+                    curve = [_mean(j) / base for j in range(n_phases)]
+                    enh_max_idx = int(np.argmax(curve))
+                    enh_max = float(curve[enh_max_idx])
+        except Exception:
+            pass
     del img4d
-    if min_enh and enh is not None and enh < min_enh:
-        return {"pid": pid, "skip": f"low enhancement {enh:.2f}", "enh_ratio": enh}
+    if enh_max is None:
+        enh_max = enh
+    # filter on the MAX over the series: only that separates "never enhanced" from
+    # "we picked the wrong phase" (e.g. interleaved sub-series).
+    if min_enh and enh_max is not None and enh_max < min_enh:
+        return {"pid": pid, "skip": f"no enhancement (max {enh_max:.2f})",
+                "enh_ratio": enh, "enh_max": enh_max}
 
     dst.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(phase, str(dst / "DCE_to_T2W.nii.gz"), True)     # True = compress
@@ -102,7 +163,9 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
             shutil.copyfile(p, dst / name)
 
     rec = {"pid": pid, "phase_idx": idx, "rel_time_s": t_sel, "n_phases": n_phases,
-           "target_time": target_time, "enh_ratio": enh, "dwi_src": Path(dwi).name}
+           "target_time": target_time, "enh_ratio": enh, "enh_max": enh_max,
+           "enh_max_idx": enh_max_idx, "interleave": interleave, "sub_series": sub,
+           "dwi_src": Path(dwi).name}
     meta_p.write_text(json.dumps(rec, indent=1))
     return rec
 
@@ -209,11 +272,25 @@ def _stats(ok, skipped=()):
         print(f"  phase time: median {np.median(ts):.1f}s  range {min(ts):.1f}-{max(ts):.1f}s")
     if enh:
         e = np.array(enh)
-        lo = (e < 1.2).sum()
-        print(f"  enhancement ratio: median {np.median(e):.2f}  "
+        print(f"  enhancement @ selected phase: median {np.median(e):.2f}  "
               f"p10 {np.percentile(e,10):.2f}  p90 {np.percentile(e,90):.2f}")
-        print(f"  {lo} case(s) < 1.2x enhancement (suspect: failed/mistimed injection)"
-              + ("  -> consider --min-enh 1.2" if lo else ""))
+    # split the weak cases: never-enhanced (drop) vs mis-selected phase (recoverable)
+    weak = [r for r in ok if (r.get("enh_ratio") or 9) < 1.2]
+    dead = [r for r in weak if (r.get("enh_max") or 0) < 1.2]
+    fixable = [r for r in weak if (r.get("enh_max") or 0) >= 1.2]
+    if weak:
+        print(f"  {len(weak)} case(s) < 1.2x at the selected phase:")
+        print(f"     {len(dead)} never enhance anywhere in the series "
+              f"(failed/mistimed injection) -> --min-enh 1.2 drops these")
+        if fixable:
+            print(f"     {len(fixable)} DO enhance elsewhere (max up to "
+                  f"{max(r['enh_max'] for r in fixable):.2f}x) -> phase mis-selected, "
+                  f"recoverable; see interleave below")
+    inter = [r for r in ok if (r.get("interleave") or 1) > 1]
+    if inter:
+        ks = sorted({r["interleave"] for r in inter})
+        print(f"  {len(inter)} case(s) have interleaved sub-series (k={ks}) -- the 4D "
+              f"stacks >1 volume per timepoint (e.g. Dixon water/fat)")
 
 
 def _report(out: Path):
