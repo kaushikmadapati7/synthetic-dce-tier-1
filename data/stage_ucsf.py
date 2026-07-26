@@ -53,20 +53,37 @@ COPY_FILES = ["prostate_mask.nii.gz", "prostate_zones.nii.gz"]
 
 # sweep the full enhancement curve only when the selected phase looks weak
 SWEEP_BELOW = 1.5
+# ...and if the sweep shows the study DOES enhance this much, the timing was wrong,
+# not the study: re-select from the curve instead of trusting the timestamps.
+RESELECT_ABOVE = 1.5
+# curve-based target = first phase reaching this fraction of max (plateau onset)
+PLATEAU_FRAC = 0.9
+
+
+MAX_INTERLEAVE = 4
 
 
 def _interleave_factor(dce_dir):
-    """How many sub-series are interleaved in the 4D, inferred from repeated
+    """How many sub-series are interleaved in the 4D, inferred from REPEATED
     timestamps. Some UCSF studies stack e.g. Dixon water/fat or two echoes, so the
     4D holds k volumes per timepoint (n_phases = k * n_timepoints) and a plain index
-    alternates between sub-series -- one of which barely enhances. Returns k (1 =
-    a normal single series)."""
+    alternates between sub-series -- one of which barely enhances. Returns k (1 = a
+    normal single series).
+
+    Only genuinely repeated timestamps count: a series with MISSING (null) times
+    would otherwise collapse to one unique value and masquerade as k = n_phases.
+    """
     try:
         meta = json.loads((Path(dce_dir) / "dce_times.json").read_text())
         phases = meta["phases"] if isinstance(meta, dict) and "phases" in meta else meta
         ts = [p.get("rel_time_s") for p in phases]
-        uniq = len({t for t in ts if t is not None})
-        return max(1, round(len(ts) / uniq)) if uniq else 1
+        if not ts or any(t is None for t in ts):
+            return 1                              # incomplete timing -> can't infer
+        uniq = len(set(ts))
+        if uniq == 0 or len(ts) % uniq:
+            return 1                              # not a clean k-per-timepoint stack
+        k = len(ts) // uniq
+        return k if 1 <= k <= MAX_INTERLEAVE else 1
     except Exception:
         return 1
 
@@ -127,20 +144,36 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     phase = extract_phase_from_4d(img4d, idx)
 
     # QC: mask-mean enhancement of the chosen phase vs its sub-series pre-contrast.
-    # If that looks low, sweep the WHOLE series for the max -- a low selected-phase
-    # value can mean either a genuinely non-enhancing study (max also ~1.0 -> drop)
-    # or a mis-selected phase (max is high -> keep and fix selection), and only the
-    # max distinguishes them. The sweep is skipped on the healthy majority.
+    # If that looks low, sweep the series for the max -- a low selected-phase value
+    # can mean either a genuinely non-enhancing study (max also ~1.0 -> drop) or a
+    # mis-selected phase (max is high -> re-select), and only the max distinguishes
+    # them. The sweep is skipped on the healthy majority.
     enh = enh_max = enh_max_idx = None
+    select_mode = "time"
     if m is not None:
         try:
-            base = _mean(idx % interleave if interleave > 1 else 0)
+            off = idx % interleave if interleave > 1 else 0
+            base = _mean(off)
             if abs(base) > 1e-6:
                 enh = float(sitk.GetArrayFromImage(phase)[m].mean() / base)
                 if enh < SWEEP_BELOW and n_phases > 1:
-                    curve = [_mean(j) / base for j in range(n_phases)]
-                    enh_max_idx = int(np.argmax(curve))
-                    enh_max = float(curve[enh_max_idx])
+                    js = list(range(off, n_phases, interleave))   # same sub-series only
+                    curve = [_mean(j) / base for j in js]
+                    k = int(np.argmax(curve))
+                    enh_max_idx, enh_max = js[k], float(curve[k])
+                    # Timing was unusable (e.g. corrupt right after phase 0, so we fell
+                    # back to the pre-contrast volume) yet the study clearly enhances ->
+                    # re-select from the curve at PLATEAU ONSET: the first phase reaching
+                    # 90% of max. That is what target_time=120s approximates anyway, and
+                    # it needs no trustworthy timestamps.
+                    if enh_max >= RESELECT_ABOVE:
+                        thr = PLATEAU_FRAC * enh_max
+                        j = next((jj for jj, v in zip(js, curve) if v >= thr), enh_max_idx)
+                        if j != idx:
+                            idx, select_mode = j, "curve"
+                            phase = extract_phase_from_4d(img4d, idx)
+                            t_sel = None          # timing untrustworthy for this case
+                            enh = float(curve[js.index(j)])
         except Exception:
             pass
     del img4d
@@ -167,7 +200,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     rec = {"pid": pid, "phase_idx": idx, "rel_time_s": t_sel, "n_phases": n_phases,
            "target_time": target_time, "enh_ratio": enh, "enh_max": enh_max,
            "enh_max_idx": enh_max_idx, "interleave": interleave, "sub_series": sub,
-           "dwi_src": Path(dwi).name}
+           "select_mode": select_mode, "dwi_src": Path(dwi).name}
     meta_p.write_text(json.dumps(rec, indent=1))
     return rec
 
@@ -297,6 +330,16 @@ def _stats(ok, skipped=()):
         ks = sorted({r["interleave"] for r in inter})
         print(f"  {len(inter)} case(s) have interleaved sub-series (k={ks}) -- the 4D "
               f"stacks >1 volume per timepoint (e.g. Dixon water/fat)")
+    curved = [r for r in ok if r.get("select_mode") == "curve"]
+    if curved:
+        e = [r["enh_ratio"] for r in curved if r.get("enh_ratio")]
+        print(f"  {len(curved)} case(s) had unusable timing -> phase re-selected from the "
+              f"enhancement curve (plateau onset)" +
+              (f", enhancement now median {np.median(e):.2f}x" if e else ""))
+    t0 = [r for r in ok if r.get("rel_time_s") == 0]
+    if t0:
+        print(f"  WARNING {len(t0)} case(s) still target t=0 (pre-contrast) -- "
+              f"broken timing AND no measurable enhancement")
 
 
 def _report(out: Path, prune_below: float = 0.0):
