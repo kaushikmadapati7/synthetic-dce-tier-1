@@ -198,7 +198,7 @@ def _build_data_ucsf(args, cfg, out):
             hcfg.dce_robust_k = args.dce_robust_k
             harmonizer = Harmonizer(hcfg)
             if harmonizer.nyul_modalities:
-                fit_ds = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root, cfg,
+                fit_ds = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root or None, cfg,
                                         target_time=args.dce_target_time,
                                         dwi_bvalue=args.dwi_bvalue)
                 if len(fit_ds):
@@ -215,9 +215,10 @@ def _build_data_ucsf(args, cfg, out):
 
     kw = dict(target_time=args.dce_target_time, dwi_bvalue=args.dwi_bvalue,
               test_frac=args.ucsf_test_frac, seed=args.seed)
-    train = build_ucsf_datasets(args.ucsf_main_root, args.ucsf_dce_root, cfg, "train",
+    dce_root = args.ucsf_dce_root or None          # None => staged (pre-extracted 3D DCE)
+    train = build_ucsf_datasets(args.ucsf_main_root, dce_root, cfg, "train",
                                 harmonizer, **kw)
-    test = build_ucsf_datasets(args.ucsf_main_root, args.ucsf_dce_root, cfg, "test",
+    test = build_ucsf_datasets(args.ucsf_main_root, dce_root, cfg, "test",
                                harmonizer, **kw)
     if len(train) == 0:
         log.error(f"UCSF train split is EMPTY under main-root={args.ucsf_main_root} / "
@@ -333,13 +334,18 @@ def parse_args():
     # When --ucsf-main-root is set, build_data uses the UCSF path (patient-level split)
     # instead of the Bao silver layout, ignoring --data-root/--test-hospitals.
     p.add_argument("--ucsf-main-root", default="",
-                   help="UCSF DS2 registered tree (<pid>/ with T2W, DWI_b*, ADC, masks). "
+                   help="UCSF patient tree: either the staged root from data/stage_ucsf.py "
+                        "(preferred for training) or the raw DS2 registered tree. "
                         "Empty = off (use the Bao --data-root path)")
     p.add_argument("--ucsf-dce-root", default="",
-                   help="UCSF DS3 registered tree (<pid>/DCE/ with DCE_4D_to_T2W + dce_times.json)")
-    p.add_argument("--dce-target-time", type=float, default=60.0,
-                   help="target acquisition time (s post pre-contrast) for the UCSF DCE peak phase; "
-                        "the 4D phase with the closest valid rel_time_s is used")
+                   help="UCSF DS3 registered tree (<pid>/DCE/ with DCE_4D_to_T2W + dce_times.json). "
+                        "OMIT when --ucsf-main-root is a staged root (DCE already extracted to 3D); "
+                        "setting it reads the ~1GB 4D per sample and is far slower")
+    p.add_argument("--dce-target-time", type=float, default=120.0,
+                   help="target acquisition time (s post pre-contrast) for the UCSF DCE phase "
+                        "(raw mode only; staged data has it baked in). Default 120s = the stable "
+                        "plateau: UCSF enhancement washes in ~55-90s then plateaus ~2.5x past 300s, "
+                        "so intensity-argmax would pick plateau noise in the washout")
     p.add_argument("--dwi-bvalue", default="",
                    help="preferred UCSF DWI b-value for the DWI channel (e.g. 1000); "
                         "empty/'auto' = highest available (b1000 -> b0600 -> ...)")

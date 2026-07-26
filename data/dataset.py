@@ -414,28 +414,57 @@ def _ucsf_dwi_stems(bvalue):
     return [f"DWI_b{b}_to_T2W", f"DWI_b0{b}_to_T2W"] + UCSF_STEMS["dwi"]
 
 
-class UCSFDCEDataset(Dataset):
-    """UCSF prostate cohort, split across two fac mounts:
+def ucsf_phase_index(dce_dir: Path, target_time: float = 120.0, t_max: float = 600.0):
+    """(phase_idx, rel_time_s) closest to `target_time` from a UCSF `dce_times.json`.
 
+    Schema: {"case":..., "n_phases":N, "phases":[{"idx":i, "rel_time_s":t}, ...]}
+    (idx 0 is pre-contrast at t=0). Falls back to the middle phase if timing is
+    unusable. Shared by the dataset (raw mode) and `data/stage_ucsf.py`.
+    """
+    meta = json.loads((Path(dce_dir) / "dce_times.json").read_text())
+    phases = meta["phases"] if isinstance(meta, dict) and "phases" in meta else meta
+    pt = [(p.get("idx", j), p.get("rel_time_s", p.get("rel_time")))
+          for j, p in enumerate(phases)]
+    idx = select_phase_by_time(pt, target_time, t_max)
+    if idx is None:                                # unusable timing -> middle phase
+        idx = pt[len(pt) // 2][0] if pt else 0
+    t = next((t for i, t in pt if i == idx), None)
+    return idx, t
+
+
+class UCSFDCEDataset(Dataset):
+    """UCSF prostate cohort. Two source modes:
+
+    RAW (dce_root given) -- the data as delivered, split across two fac mounts:
         <main_root>/<pid>/       T2W, ADC_to_T2W, DWI_b*_to_T2W, prostate_mask,
                                  prostate_zones                              (DS2)
         <dce_root>/<pid>/DCE/    DCE_4D_to_T2W.nii.gz + dce_times.json,
                                  pregad_4D_to_T2W.nii.gz + pregad_times.json (DS3)
+      The target phase is extracted from the ~1 GB 4D series on every read, so this
+      mode is I/O-bound -- fine for inspection, too slow to train on.
 
-    The target is a single DCE phase extracted from the 4D series by ACQUISITION
-    TIME (`select_phase_by_time` with `target_time`) -- now that we have real per-
-    phase timing, a reproducible peak phase is defined by time instead of the noisy
-    intensity-argmax peak-contrast detection. The DCE tree lags the anatomical scans
-    (still transferring), so only patients present in BOTH trees are kept; the rest
-    are counted and skipped, so the loader works out-of-the-box as DCE fills in.
-    (pregad is available on disk for a future pre-contrast channel / residual target.)
+    STAGED (dce_root empty) -- the output of `data/stage_ucsf.py`: one flat dir per
+    patient with the chosen DCE phase already written as a 3D `DCE_to_T2W.nii.gz`
+    next to the anatomy. Same contract, ~30x less I/O per sample; this is what
+    training should use.
+
+    The target is a single DCE phase chosen by ACQUISITION TIME
+    (`select_phase_by_time` with `target_time`) -- with real per-phase timing, a
+    reproducible target is defined by time rather than by intensity argmax. The UCSF
+    enhancement curve rises steeply from ~55-90s then PLATEAUS (~2.5x baseline) out
+    past 300s, so argmax would land on plateau noise (~280s, into washout); a
+    target_time in the stable plateau (~120s) is both reproducible and near-peak.
+
+    The DCE tree lags the anatomical scans (still transferring), so only patients
+    with DCE present are kept; the rest are counted and skipped, so the loader keeps
+    working as DCE fills in. (pregad is on disk for a future pre-contrast channel.)
     """
 
-    def __init__(self, main_root, dce_root, cfg: PreprocessConfig | None = None,
-                 harmonizer=None, subject_glob="*", target_time: float = 60.0,
+    def __init__(self, main_root, dce_root=None, cfg: PreprocessConfig | None = None,
+                 harmonizer=None, subject_glob="*", target_time: float = 120.0,
                  t_max: float = 600.0, dwi_bvalue: str | None = None, pids=None):
         self.main_root = Path(main_root)
-        self.dce_root = Path(dce_root)
+        self.dce_root = Path(dce_root) if dce_root else None      # None => staged mode
         self.cfg = cfg or PreprocessConfig()
         self.harmonizer = harmonizer
         self.target_time = target_time
@@ -454,18 +483,24 @@ class UCSFDCEDataset(Dataset):
             adc = _resolve_stem(subj, UCSF_STEMS["adc"])
             dwi = _resolve_stem(subj, self.dwi_stems)
             mask = subj / "prostate_mask.nii.gz"
-            dce_dir = self.dce_root / pid / "DCE"
-            dce4d = dce_dir / "DCE_4D_to_T2W.nii.gz"
-            times = dce_dir / "dce_times.json"
             if not (t2 and adc and dwi and mask.exists()):
                 skipped += 1
                 continue
-            if not (dce4d.exists() and times.exists()):
-                no_dce += 1                        # anatomy present, DCE not transferred yet
+            if self.dce_root is not None:                  # raw: 4D series + timing
+                dce_dir = self.dce_root / pid / "DCE"
+                ok = (dce_dir / "DCE_4D_to_T2W.nii.gz").exists() and \
+                     (dce_dir / "dce_times.json").exists()
+                src = dce_dir
+            else:                                          # staged: pre-extracted 3D phase
+                src = _resolve_stem(subj, ["DCE_to_T2W", "DCE"])
+                ok = src is not None
+            if not ok:
+                no_dce += 1                        # anatomy present, DCE not ready yet
                 continue
-            self.samples.append((pid, subj, dce_dir))
+            self.samples.append((pid, subj, src))
             found += 1
-        log.info(f"[ucsf] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE) "
+        mode = "raw-4D" if self.dce_root is not None else "staged-3D"
+        log.info(f"[ucsf/{mode}] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE) "
                  f"under {self.main_root} | target_time={target_time}s dwi={dwi_bvalue or 'auto'}")
 
     def __len__(self):
@@ -475,25 +510,18 @@ class UCSFDCEDataset(Dataset):
     def pids(self):
         return [s[0] for s in self.samples]
 
-    def _select_dce_phase(self, dce_dir: Path):
-        """Time-selected 3D DCE phase from the 4D series (peak phase by acq time)."""
-        meta = json.loads((dce_dir / "dce_times.json").read_text())
-        phases = meta["phases"] if isinstance(meta, dict) and "phases" in meta else meta
-        pt = [(p.get("idx", j), p.get("rel_time_s", p.get("rel_time")))
-              for j, p in enumerate(phases)]
-        idx = select_phase_by_time(pt, self.target_time, self.t_max)
-        if idx is None:                            # no valid timing -> middle phase
-            idx = pt[len(pt) // 2][0] if pt else 0
-        img4d = load_sitk_4d(dce_dir / "DCE_4D_to_T2W.nii.gz")
-        return extract_phase_from_4d(img4d, idx)
-
     def _load_images(self, i):
-        pid, subj, dce_dir = self.samples[i]
+        pid, subj, src = self.samples[i]
         paths = {"t2w": _resolve_stem(subj, UCSF_STEMS["t2w"]),
                  "adc": _resolve_stem(subj, UCSF_STEMS["adc"]),
                  "dwi": _resolve_stem(subj, self.dwi_stems)}
         images = {k: load_sitk(p) for k, p in paths.items()}
-        images[DCE_KEY] = self._select_dce_phase(dce_dir)
+        if self.dce_root is not None:              # raw: extract the phase from the 4D
+            idx, _ = ucsf_phase_index(src, self.target_time, self.t_max)
+            images[DCE_KEY] = extract_phase_from_4d(
+                load_sitk_4d(src / "DCE_4D_to_T2W.nii.gz"), idx)
+        else:                                      # staged: already a 3D phase on disk
+            images[DCE_KEY] = load_sitk(src)
         mask_path = subj / "prostate_mask.nii.gz"
         zones_path = subj / "prostate_zones.nii.gz"
         mask = load_sitk(mask_path) if mask_path.exists() else None
@@ -566,8 +594,8 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
     return ConcatDataset(parts) if parts else _EmptyDataset()
 
 
-def build_ucsf_datasets(main_root, dce_root, cfg: PreprocessConfig | None = None,
-                        split="train", harmonizer=None, target_time=60.0,
+def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None = None,
+                        split="train", harmonizer=None, target_time=120.0,
                         dwi_bvalue=None, test_frac=0.15, seed=0, subject_glob="*"):
     """UCSF single-center cohort with a deterministic patient-level train/test split.
 
