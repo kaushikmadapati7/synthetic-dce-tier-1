@@ -38,6 +38,14 @@ SPATIAL_SIZE=${SPATIAL_SIZE:-"32 192 192"}   # D H W
 REFERENCE=${REFERENCE:-dce}                   # t2w | dce | iso
 DCE_PHASE=${DCE_PHASE:-early}                 # zhongyiyuan target: early | peak | <int>
 TEST_HOSPITALS=${TEST_HOSPITALS:-jiulong}     # held-out center(s), space-separated
+# ---- UCSF cohort (set UCSF_ROOT to switch off the Bao layout entirely) ---------
+# UCSF_ROOT should be the STAGED tree from scripts/stage_ucsf.slurm (DCE already
+# extracted to 3D). Setting UCSF_DCE_ROOT instead reads the ~1GB 4D per sample.
+UCSF_ROOT=${UCSF_ROOT:-}                      # staged root; empty = use Bao DATA_ROOT
+UCSF_DCE_ROOT=${UCSF_DCE_ROOT:-}              # raw DS3 tree (slow path; usually leave empty)
+UCSF_TEST_FRAC=${UCSF_TEST_FRAC:-0.15}        # patient-level held-out fraction (single center)
+DCE_TARGET_TIME=${DCE_TARGET_TIME:-120}       # raw mode only (staged has it baked in)
+DWI_BVALUE=${DWI_BVALUE:-}                    # '' = highest available (b1000)
 HARMONIZE=${HARMONIZE:-1}                      # 1 = Nyul harmonization on, 0 = off
 HARMONIZE_MAX=${HARMONIZE_MAX:-200}
 T2W_NORM=${T2W_NORM:-nyul}                    # T2w INPUT norm: nyul | percentile (per-image, generalizes)
@@ -58,6 +66,8 @@ SELECT_METRIC=${SELECT_METRIC:-ssim_roi}  # best-ckpt metric: ssim_roi|roi_pears
 # ---- model size ---------------------------------------------------------------
 BASE_CH=${BASE_CH:-32}
 N_UPSAMPLES=${N_UPSAMPLES:-4}                  # GAN up/down depth
+FIRST_STAGE=${FIRST_STAGE:-vae}                # LDM first stage: vae | wavelet | medvae
+MEDVAE_MODEL=${MEDVAE_MODEL:-medvae_4_1_3d}    # FIRST_STAGE=medvae: 3D 1-channel foundation VAE
 KL_WEIGHT=${KL_WEIGHT:-1e-6}                   # VAE
 VAE_ADV_WEIGHT=${VAE_ADV_WEIGHT:-0.0}          # VAE patch-discriminator weight (0=off; 0.1-0.5 sharpens, reduces LDM blur)
 VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adversarial term starts
@@ -128,14 +138,17 @@ export HF_HOME=${HF_HOME:-/mnt/scratch/user/kmadapati/.hf}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} model=${MODEL} env=${CONDA_ENV}"
-echo "data_root=${DATA_ROOT}  output_dir=${OUTPUT_DIR}"
+if [ -n "${UCSF_ROOT}" ]; then
+  echo "cohort=UCSF  ucsf_root=${UCSF_ROOT}  first_stage=${FIRST_STAGE}  output_dir=${OUTPUT_DIR}"
+else
+  echo "cohort=Bao   data_root=${DATA_ROOT}  first_stage=${FIRST_STAGE}  output_dir=${OUTPUT_DIR}"
+fi
 python -c "import torch; print('torch', torch.__version__, 'cuda_avail', torch.cuda.is_available())"
 nvidia-smi || true
 
 # ---- assemble args ------------------------------------------------------------
 ARGS=(
   --model "${MODEL}"
-  --data-root "${DATA_ROOT}"
   --output-dir "${OUTPUT_DIR}"
   --seed "${SEED}"
   --spatial-size ${SPATIAL_SIZE}
@@ -143,8 +156,7 @@ ARGS=(
   --t2w-norm "${T2W_NORM}"
   --dce-norm "${DCE_NORM}"
   --dce-robust-k "${DCE_ROBUST_K}"
-  --dce-phase "${DCE_PHASE}"
-  --test-hospitals ${TEST_HOSPITALS}
+  --first-stage "${FIRST_STAGE}"
   --harmonize-max "${HARMONIZE_MAX}"
   --epochs "${EPOCHS}"
   --vae-epochs "${VAE_EPOCHS}"
@@ -191,6 +203,19 @@ ARGS=(
   --fid-slices "${FID_SLICES}"
   --fid-batch-size "${FID_BATCH_SIZE}"
 )
+# data source: UCSF (single center, patient-level split) or the Bao silver layout
+if [ -n "${UCSF_ROOT}" ]; then
+  ARGS+=(--ucsf-main-root "${UCSF_ROOT}"
+         --ucsf-test-frac "${UCSF_TEST_FRAC}"
+         --dce-target-time "${DCE_TARGET_TIME}")
+  if [ -n "${UCSF_DCE_ROOT}" ]; then ARGS+=(--ucsf-dce-root "${UCSF_DCE_ROOT}"); fi
+  if [ -n "${DWI_BVALUE}" ];   then ARGS+=(--dwi-bvalue "${DWI_BVALUE}"); fi
+else
+  ARGS+=(--data-root "${DATA_ROOT}"
+         --dce-phase "${DCE_PHASE}"
+         --test-hospitals ${TEST_HOSPITALS})
+fi
+if [ "${FIRST_STAGE}" = "medvae" ]; then ARGS+=(--medvae-model "${MEDVAE_MODEL}"); fi
 if [ "${HARMONIZE}" != "1" ]; then ARGS+=(--no-harmonize); fi
 if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
 if [ "${EVAL_ONLY}" = "1" ]; then ARGS+=(--eval-only); fi

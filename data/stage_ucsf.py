@@ -117,8 +117,8 @@ def _worker(a):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--main-root", required=True, help="UCSF DS2 registered tree (anatomy/masks)")
-    p.add_argument("--dce-root", required=True, help="UCSF DS3 registered tree (<pid>/DCE/)")
+    p.add_argument("--main-root", default="", help="UCSF DS2 registered tree (anatomy/masks)")
+    p.add_argument("--dce-root", default="", help="UCSF DS3 registered tree (<pid>/DCE/)")
     p.add_argument("--out", required=True, help="output staged root (use fast local scratch)")
     p.add_argument("--target-time", type=float, default=120.0,
                    help="acquisition time (s) of the DCE phase to extract; default 120 "
@@ -131,15 +131,32 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--overwrite", action="store_true")
+    # SLURM array sharding: each task takes a strided slice of the patient list
+    # (strided, not contiguous, so uneven per-case cost spreads evenly across tasks).
+    p.add_argument("--shard", type=int, default=0, help="this task's index (0-based)")
+    p.add_argument("--num-shards", type=int, default=1, help="total array tasks")
+    p.add_argument("--report", action="store_true",
+                   help="don't stage; scan <out>/*/stage_meta.json and print the aggregate "
+                        "summary (use after a sharded array job finishes)")
     a = p.parse_args(argv)
+
+    out = Path(a.out)
+    if a.report:
+        return _report(out)
+    if not (a.main_root and a.dce_root):
+        p.error("--main-root and --dce-root are required unless --report")
 
     pids = sorted(d.name for d in Path(a.dce_root).glob("*")
                   if (d / "DCE" / "DCE_4D_to_T2W.nii.gz").exists())
     if a.limit:
         pids = pids[:a.limit]
-    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    n_all = len(pids)
+    if a.num_shards > 1:
+        pids = pids[a.shard::a.num_shards]
+    out.mkdir(parents=True, exist_ok=True)
+    shard_note = f", shard {a.shard}/{a.num_shards} of {n_all}" if a.num_shards > 1 else ""
     print(f"staging {len(pids)} patients -> {out}  (target_time={a.target_time}s, "
-          f"workers={a.workers})", flush=True)
+          f"workers={a.workers}{shard_note})", flush=True)
 
     jobs = [(pid, a.main_root, a.dce_root, a.out, a.target_time, a.t_max,
              a.dwi_bvalue, a.min_enh, a.overwrite) for pid in pids]
@@ -161,11 +178,24 @@ def main(argv=None):
 
     ok = [r for r in recs if "skip" not in r]
     skipped = [r for r in recs if "skip" in r]
-    (out / "stage_summary.json").write_text(json.dumps(
+    name = "stage_summary.json" if a.num_shards == 1 else f"stage_summary_{a.shard:03d}.json"
+    (out / name).write_text(json.dumps(
         {"n_ok": len(ok), "n_skipped": len(skipped), "target_time": a.target_time,
+         "shard": a.shard, "num_shards": a.num_shards,
          "records": sorted(recs, key=lambda r: r["pid"])}, indent=1))
 
     print(f"\nstaged {len(ok)}  skipped {len(skipped)}  in {time.time()-t0:.0f}s")
+    _stats(ok, skipped)
+    if a.num_shards > 1:
+        print(f"\n(shard {a.shard} done; after ALL array tasks finish run:\n"
+              f"   python -m tier1_static.data.stage_ucsf --report --out {out})")
+    else:
+        print(f"\ntrain with:  --ucsf-main-root {out}   (no --ucsf-dce-root)")
+    return 0
+
+
+def _stats(ok, skipped=()):
+    """Print phase/time/enhancement distributions for a set of staged records."""
     if skipped:
         from collections import Counter
         for reason, n in Counter(r["skip"].split(":")[0] for r in skipped).most_common():
@@ -175,12 +205,29 @@ def main(argv=None):
     enh = [r["enh_ratio"] for r in ok if r.get("enh_ratio")]
     if idxs:
         print(f"  phase idx : median {int(np.median(idxs))}  range {min(idxs)}-{max(idxs)}")
+    if ts:
         print(f"  phase time: median {np.median(ts):.1f}s  range {min(ts):.1f}-{max(ts):.1f}s")
     if enh:
         e = np.array(enh)
+        lo = (e < 1.2).sum()
         print(f"  enhancement ratio: median {np.median(e):.2f}  "
-              f"p10 {np.percentile(e,10):.2f}  p90 {np.percentile(e,90):.2f}  "
-              f"| {(e < 1.2).sum()} case(s) < 1.2x (suspect)")
+              f"p10 {np.percentile(e,10):.2f}  p90 {np.percentile(e,90):.2f}")
+        print(f"  {lo} case(s) < 1.2x enhancement (suspect: failed/mistimed injection)"
+              + ("  -> consider --min-enh 1.2" if lo else ""))
+
+
+def _report(out: Path):
+    """Aggregate every per-patient stage_meta.json under `out` (post-array summary)."""
+    recs = []
+    for m in sorted(out.glob("*/stage_meta.json")):
+        try:
+            recs.append(json.loads(m.read_text()))
+        except Exception:
+            print(f"  unreadable: {m}")
+    print(f"staged patients under {out}: {len(recs)}")
+    _stats(recs)
+    (out / "stage_summary.json").write_text(json.dumps(
+        {"n_ok": len(recs), "records": sorted(recs, key=lambda r: r["pid"])}, indent=1))
     print(f"\ntrain with:  --ucsf-main-root {out}   (no --ucsf-dce-root)")
     return 0
 
