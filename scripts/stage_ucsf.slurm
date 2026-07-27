@@ -2,8 +2,11 @@
 #SBATCH --job-name=ucsf_stage
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=96G
 #SBATCH --time=04:00:00
+# MEMORY: each worker holds one whole 4D series. Most are ~1 GB (35 phases) but this
+# cohort has 70-phase studies at ~2.4 GB, so 8 workers need ~20 GB + copies/overhead;
+# --mem=32G was OOM-killed (exit 0:125). Keep mem >= ~12 GB per cpus-per-task.
 #SBATCH --array=0-7
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
