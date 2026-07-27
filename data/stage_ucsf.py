@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from .dataset import UCSF_STEMS, _ucsf_dwi_stems, _resolve_stem, ucsf_phase_index
+from .dataset import UCSF_STEMS, ucsf_dwi_path, _resolve_stem, ucsf_phase_index
 from .preprocessing import extract_phase_from_4d, load_sitk_4d
 
 # copied verbatim (mask/zones are labels; anatomy is already registered to T2W)
@@ -100,7 +100,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     dce_dir = Path(dce_root) / pid / "DCE"
     t2 = _resolve_stem(subj, UCSF_STEMS["t2w"])
     adc = _resolve_stem(subj, UCSF_STEMS["adc"])
-    dwi = _resolve_stem(subj, _ucsf_dwi_stems(dwi_bvalue))
+    dwi = ucsf_dwi_path(subj, dwi_bvalue)
     mask_p = subj / "prostate_mask.nii.gz"
     if not (t2 and adc and dwi and mask_p.exists()):
         return {"pid": pid, "skip": "missing inputs"}

@@ -414,6 +414,29 @@ def _ucsf_dwi_stems(bvalue):
     return [f"DWI_b{b}_to_T2W", f"DWI_b0{b}_to_T2W"] + UCSF_STEMS["dwi"]
 
 
+def _dwi_bval(p: Path) -> int:
+    m = re.search(r"DWI_b0*(\d+)", p.name)
+    return int(m.group(1)) if m else -1
+
+
+def ucsf_dwi_path(subj: Path, bvalue=None):
+    """Resolve a UCSF patient's DWI file by GLOB, not a fixed stem list.
+
+    b-values vary widely across this cohort (b0/50/.../1000/1500/2000 all appear),
+    so matching a hardcoded set silently drops every patient acquired at an unlisted
+    value -- that dropped ~1000 of 5439 cases as "missing inputs" despite having DWI
+    on disk. Prefer the requested b-value, else the nearest available (ties -> higher,
+    since high-b gives the better lesion contrast), else fall back to a bare name.
+    """
+    cands = sorted(subj.glob("DWI_b*_to_T2W.nii*"))
+    if not cands:
+        return _resolve_stem(subj, ["DWI_to_T2W", "DWI"])
+    if bvalue not in (None, "", "auto"):
+        want = int(str(bvalue).lstrip("b"))
+        return min(cands, key=lambda p: (abs(_dwi_bval(p) - want), -_dwi_bval(p)))
+    return max(cands, key=_dwi_bval)
+
+
 def ucsf_phase_index(dce_dir: Path, target_time: float = 120.0, t_max: float = 600.0):
     """(phase_idx, rel_time_s) closest to `target_time` from a UCSF `dce_times.json`.
 
@@ -469,7 +492,7 @@ class UCSFDCEDataset(Dataset):
         self.harmonizer = harmonizer
         self.target_time = target_time
         self.t_max = t_max
-        self.dwi_stems = _ucsf_dwi_stems(dwi_bvalue)
+        self.dwi_bvalue = dwi_bvalue
         keep = set(pids) if pids is not None else None
         self.samples = []
         found = skipped = no_dce = 0
@@ -481,7 +504,7 @@ class UCSFDCEDataset(Dataset):
                 continue
             t2 = _resolve_stem(subj, UCSF_STEMS["t2w"])
             adc = _resolve_stem(subj, UCSF_STEMS["adc"])
-            dwi = _resolve_stem(subj, self.dwi_stems)
+            dwi = ucsf_dwi_path(subj, self.dwi_bvalue)
             mask = subj / "prostate_mask.nii.gz"
             if not (t2 and adc and dwi and mask.exists()):
                 skipped += 1
@@ -514,7 +537,7 @@ class UCSFDCEDataset(Dataset):
         pid, subj, src = self.samples[i]
         paths = {"t2w": _resolve_stem(subj, UCSF_STEMS["t2w"]),
                  "adc": _resolve_stem(subj, UCSF_STEMS["adc"]),
-                 "dwi": _resolve_stem(subj, self.dwi_stems)}
+                 "dwi": ucsf_dwi_path(subj, self.dwi_bvalue)}
         images = {k: load_sitk(p) for k, p in paths.items()}
         if self.dce_root is not None:              # raw: extract the phase from the 4D
             idx, _ = ucsf_phase_index(src, self.target_time, self.t_max)
