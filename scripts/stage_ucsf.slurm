@@ -51,6 +51,17 @@ SHARD=${SLURM_ARRAY_TASK_ID:-0}
 NSHARD=${SLURM_ARRAY_TASK_COUNT:-1}
 echo "host=$(hostname) job=${SLURM_ARRAY_JOB_ID:-NA} shard=${SHARD}/${NSHARD} out=${OUT}"
 
+# Preflight: /mnt/fac is not mounted on every compute node (ENODEV / "No such
+# device"), which otherwise surfaces as an opaque traceback deep in a glob. Fail
+# fast and name the node so the job can be resubmitted with --nodelist/--exclude.
+for d in "${FAC}" "${DCE}"; do
+  if [ ! -d "${d}" ]; then
+    echo "FATAL: fac mount unavailable on $(hostname): ${d}" >&2
+    echo "       resubmit pinned to a node that has it, e.g. --nodelist=<node>" >&2
+    exit 17
+  fi
+done
+
 python -m tier1_static.data.stage_ucsf \
   --main-root "${FAC}" --dce-root "${DCE}" --out "${OUT}" \
   --target-time "${TARGET_TIME}" --dwi-bvalue "${DWI_BVALUE}" --min-enh "${MIN_ENH}" \
