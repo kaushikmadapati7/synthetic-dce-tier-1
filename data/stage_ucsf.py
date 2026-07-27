@@ -367,7 +367,9 @@ def _report(out: Path, prune_below: float = 0.0):
             print(f"  NOTE {len(stale)} case(s) predate the QC fix (no enh_max) and were "
                   f"NOT evaluated; re-stage with --overwrite to score them")
     _stats(recs)
-    (out / "stage_summary.json").write_text(json.dumps(
+    # NOT stage_summary.json -- that is the staging run's own output (it carries the
+    # skip records), and clobbering it loses why cases were dropped.
+    (out / "stage_report.json").write_text(json.dumps(
         {"n_ok": len(recs), "records": sorted(recs, key=lambda r: r["pid"])}, indent=1))
     print(f"\ntrain with:  --ucsf-main-root {out}   (no --ucsf-dce-root)")
     return 0
