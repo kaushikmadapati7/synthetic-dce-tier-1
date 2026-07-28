@@ -194,8 +194,9 @@ def _build_data_ucsf(args, cfg, out):
             log.info(f"eval-only: loaded harmonizer {saved} (skipping re-fit)")
         else:
             hcfg = HarmonizationConfig()
-            hcfg.methods = dict(hcfg.methods, t2w=args.t2w_norm, dce=args.dce_norm)
-            hcfg.dce_robust_k = args.dce_robust_k
+            hcfg.methods = dict(hcfg.methods, t2w=args.t2w_norm, dce=args.dce_norm,
+                                pre=args.dce_norm)   # pre-contrast: same series as the
+            hcfg.dce_robust_k = args.dce_robust_k    # DCE target -> normalize alike
             harmonizer = Harmonizer(hcfg)
             if harmonizer.nyul_modalities:
                 fit_ds = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root or None, cfg,
@@ -214,7 +215,8 @@ def _build_data_ucsf(args, cfg, out):
                 harmonizer.save(saved)
 
     kw = dict(target_time=args.dce_target_time, dwi_bvalue=args.dwi_bvalue,
-              test_frac=args.ucsf_test_frac, seed=args.seed)
+              test_frac=args.ucsf_test_frac, seed=args.seed,
+              use_pregad=getattr(args, 'use_pregad', False))
     dce_root = args.ucsf_dce_root or None          # None => staged (pre-extracted 3D DCE)
     train = build_ucsf_datasets(args.ucsf_main_root, dce_root, cfg, "train",
                                 harmonizer, **kw)
@@ -349,6 +351,12 @@ def parse_args():
     p.add_argument("--dwi-bvalue", default="",
                    help="preferred UCSF DWI b-value for the DWI channel (e.g. 1000); "
                         "empty/'auto' = highest available (b1000 -> b0600 -> ...)")
+    p.add_argument("--use-pregad", action="store_true", default=False,
+                   help="add pre-contrast T1 (DCE phase 0, staged as DCE_pre_to_T2W) as a 4th "
+                        "conditioning channel. The one lever that adds INFORMATION rather than "
+                        "capacity: the model sees the baseline the gland enhances FROM, so it "
+                        "predicts a residual instead of absolute intensity. Requires a staged "
+                        "tree from a stage_ucsf.py run that wrote DCE_pre_to_T2W.")
     p.add_argument("--ucsf-test-frac", type=float, default=0.15,
                    help="fraction of UCSF patients held out as the test split (patient-level, by --seed)")
     # training

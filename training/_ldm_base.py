@@ -22,9 +22,11 @@ log = logging.getLogger("tier1")
 
 
 def _cond_channels(args):
-    """3 input sequences, doubled to 6 (image + availability mask) under Layer-1
-    modality dropout so the U-Net can tell a missing sequence from a dark voxel."""
-    return 6 if getattr(args, "modality_dropout", False) else 3
+    """Input sequences: 3 (T2w/DWI/ADC), or 4 with pre-contrast T1 (--use-pregad).
+    Doubled (image + availability mask) under Layer-1 modality dropout so the U-Net
+    can tell a missing sequence from a dark voxel."""
+    n = 4 if getattr(args, "use_pregad", False) else 3
+    return n * 2 if getattr(args, "modality_dropout", False) else n
 
 
 def _new_first_stage(args, device):

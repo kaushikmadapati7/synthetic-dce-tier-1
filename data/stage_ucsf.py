@@ -142,6 +142,13 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
         idx = best
 
     phase = extract_phase_from_4d(img4d, idx)
+    # Pre-contrast T1 = phase 0 of the SELECTED sub-series (rel_time_s == 0, i.e.
+    # before injection). Same series, same geometry, already registered to the
+    # target -- so it is a better pre-contrast source than the separate pregad
+    # acquisition, and free here since the 4D is already open. Staged for the
+    # 4th-conditioning-channel / enhancement-residual experiments.
+    pre_idx = idx % interleave if interleave > 1 else 0
+    pre_phase = extract_phase_from_4d(img4d, pre_idx)
 
     # QC: mask-mean enhancement of the chosen phase vs its sub-series pre-contrast.
     # If that looks low, sweep the series for the max -- a low selected-phase value
@@ -189,6 +196,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
 
     dst.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(phase, str(dst / "DCE_to_T2W.nii.gz"), True)     # True = compress
+    sitk.WriteImage(pre_phase, str(dst / "DCE_pre_to_T2W.nii.gz"), True)
     for src, name in ((t2, "T2W.nii.gz"), (adc, "ADC_to_T2W.nii.gz"),
                       (dwi, "DWI_to_T2W.nii.gz")):
         shutil.copyfile(src, dst / name)
@@ -200,7 +208,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     rec = {"pid": pid, "phase_idx": idx, "rel_time_s": t_sel, "n_phases": n_phases,
            "target_time": target_time, "enh_ratio": enh, "enh_max": enh_max,
            "enh_max_idx": enh_max_idx, "interleave": interleave, "sub_series": sub,
-           "select_mode": select_mode, "dwi_src": Path(dwi).name}
+           "select_mode": select_mode, "pre_idx": pre_idx, "dwi_src": Path(dwi).name}
     meta_p.write_text(json.dumps(rec, indent=1))
     return rec
 

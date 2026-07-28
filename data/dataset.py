@@ -53,6 +53,7 @@ TIER1_TEST_HOSPITALS = ["jiulong"]  # held-out test center (see module docstring
 
 INPUT_KEYS = ("t2w", "dwi", "adc")
 DCE_KEY = "dce"
+PRE_KEY = "pre"   # pre-contrast T1 (DCE phase 0), optional 4th cond channel
 
 # Default silver sub-trees under the dataset root.
 IMAGE_SUBDIR = "Image_volumes"
@@ -113,8 +114,8 @@ def _silver_zones(mask_root: Path, hosp: str, subject: str):
     return None
 
 
-def _stack_sample(arrays: dict, case_id: str, spatial_size) -> dict:
-    cond = np.stack([arrays[k] for k in INPUT_KEYS], axis=0)
+def _stack_sample(arrays: dict, case_id: str, spatial_size, input_keys=None) -> dict:
+    cond = np.stack([arrays[k] for k in (input_keys or INPUT_KEYS)], axis=0)
     target = arrays[DCE_KEY][None]
     if "mask" in arrays:
         mask = arrays["mask"][None]
@@ -485,7 +486,8 @@ class UCSFDCEDataset(Dataset):
 
     def __init__(self, main_root, dce_root=None, cfg: PreprocessConfig | None = None,
                  harmonizer=None, subject_glob="*", target_time: float = 120.0,
-                 t_max: float = 600.0, dwi_bvalue: str | None = None, pids=None):
+                 t_max: float = 600.0, dwi_bvalue: str | None = None, pids=None,
+                 use_pregad: bool = False):
         self.main_root = Path(main_root)
         self.dce_root = Path(dce_root) if dce_root else None      # None => staged mode
         self.cfg = cfg or PreprocessConfig()
@@ -493,6 +495,11 @@ class UCSFDCEDataset(Dataset):
         self.target_time = target_time
         self.t_max = t_max
         self.dwi_bvalue = dwi_bvalue
+        # pre-contrast T1 (DCE phase 0) as a 4th conditioning channel: the one lever
+        # that adds INFORMATION rather than capacity -- the model gets the baseline the
+        # gland enhances FROM, so it predicts a residual instead of absolute intensity.
+        self.use_pregad = use_pregad
+        self.input_keys = INPUT_KEYS + (PRE_KEY,) if use_pregad else INPUT_KEYS
         keep = set(pids) if pids is not None else None
         self.samples = []
         found = skipped = no_dce = 0
@@ -538,7 +545,9 @@ class UCSFDCEDataset(Dataset):
         paths = {"t2w": _resolve_stem(subj, UCSF_STEMS["t2w"]),
                  "adc": _resolve_stem(subj, UCSF_STEMS["adc"]),
                  "dwi": ucsf_dwi_path(subj, self.dwi_bvalue)}
-        images = {k: load_sitk(p) for k, p in paths.items()}
+        if self.use_pregad:
+            paths[PRE_KEY] = _resolve_stem(subj, ["DCE_pre_to_T2W"])
+        images = {k: load_sitk(p) for k, p in paths.items() if p is not None}
         if self.dce_root is not None:              # raw: extract the phase from the 4D
             idx, _ = ucsf_phase_index(src, self.target_time, self.t_max)
             images[DCE_KEY] = extract_phase_from_4d(
@@ -554,7 +563,9 @@ class UCSFDCEDataset(Dataset):
     def __getitem__(self, i):
         case_id, images, mask, zones = self._load_images(i)
         arrays = process_case(images, self.cfg, mask, self.harmonizer, zones=zones)
-        return _stack_sample(arrays, case_id, self.cfg.spatial_size)
+        if self.use_pregad and PRE_KEY not in arrays:      # pre-contrast not staged
+            arrays[PRE_KEY] = np.full_like(arrays['t2w'], self.cfg.pad_value)
+        return _stack_sample(arrays, case_id, self.cfg.spatial_size, self.input_keys)
 
     def raw_modalities(self, i) -> dict:
         _, images, mask, _ = self._load_images(i)
@@ -619,7 +630,8 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
 
 def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None = None,
                         split="train", harmonizer=None, target_time=120.0,
-                        dwi_bvalue=None, test_frac=0.15, seed=0, subject_glob="*"):
+                        dwi_bvalue=None, test_frac=0.15, seed=0, subject_glob="*",
+                        use_pregad=False):
     """UCSF single-center cohort with a deterministic patient-level train/test split.
 
     UCSF is one site, so there is no held-out *hospital*; instead a fixed fraction of
@@ -629,7 +641,8 @@ def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None =
     order over the sorted, present pids). Returns a torch Subset (or empty dataset).
     """
     full = UCSFDCEDataset(main_root, dce_root, cfg, harmonizer, subject_glob=subject_glob,
-                          target_time=target_time, dwi_bvalue=dwi_bvalue)
+                          target_time=target_time, dwi_bvalue=dwi_bvalue,
+                          use_pregad=use_pregad)
     n = len(full)
     if n == 0:
         return _EmptyDataset()

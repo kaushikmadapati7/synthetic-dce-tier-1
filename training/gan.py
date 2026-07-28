@@ -24,7 +24,7 @@ def _build_gan(args, device):
     # discriminator depth is capped by the smallest dim (kernel-4 stride-2 needs dim>=2 each step):
     # layers = n_down+1 must satisfy 2**layers <= min_dim
     n_down = min(n_up, max(1, int(math.log2(min(args.spatial_size))) - 1))
-    return ConditionalGAN3D(z_dim=args.z_dim, out_channels=1, cond_channels=3,
+    return ConditionalGAN3D(z_dim=args.z_dim, out_channels=1, cond_channels=(4 if getattr(args, 'use_pregad', False) else 3),
                             base_ch=args.base_ch, init_size=init, n_upsamples=n_up,
                             in_channels=1, n_downsamples=n_down).to(device)
 
