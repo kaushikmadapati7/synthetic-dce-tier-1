@@ -94,7 +94,11 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     subj = Path(main_root) / pid
     dst = Path(out_root) / pid
     meta_p = dst / "stage_meta.json"
-    if meta_p.exists() and not overwrite:
+    # "Already staged" means every artifact this version writes is present -- including
+    # the pre-contrast phase. Checking only stage_meta.json would make a cohort staged
+    # by an older version look complete, so backfilling a newly-added output would need
+    # a full --overwrite pass (and any interruption would restart it from scratch).
+    if meta_p.exists() and (dst / "DCE_pre_to_T2W.nii.gz").exists() and not overwrite:
         return {**json.loads(meta_p.read_text()), "cached": True}
 
     dce_dir = Path(dce_root) / pid / "DCE"
