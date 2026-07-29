@@ -356,6 +356,9 @@ def parse_args():
                         "(default). 'resnet' = the original noise-vector generator, which "
                         "pools the whole conditioning volume to the bottleneck grid "
                         "(0.02%% of input detail, no skips) and can only emit smooth blobs.")
+    p.add_argument("--eval-ckpt", default="best", choices=["best", "last"],
+                   help="which checkpoint --eval-only scores (main2d). Use 'last' when "
+                        "best-ckpt selection ran under noisy validation.")
     p.add_argument("--audit-split", default="val", choices=["val","test","train"],
                    help="split for tier1_static.audit_baselines")
     p.add_argument("--use-pregad", action="store_true", default=False,

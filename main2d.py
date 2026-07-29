@@ -114,9 +114,10 @@ def main():
     name = "flow2d" if is_flow else "gan2d"
 
     if getattr(args, "eval_only", False):         # match --base-ch to the trained ckpt width
-        ck = out / f"{name}_best.pt"
+        which = getattr(args, "eval_ckpt", "best")
+        ck = out / f"{name}_{which}.pt"
         if not ck.exists():
-            ck = out / f"{name}_last.pt"
+            ck = out / f"{name}_{'last' if which == 'best' else 'best'}.pt"
         if ck.exists():
             sd = torch.load(ck, map_location="cpu", weights_only=True)
             key = "unet.cin.weight" if is_flow else "d1.0.weight"
@@ -195,9 +196,16 @@ def main():
     if not getattr(args, "eval_only", False):        # don't clobber the trained ckpt in eval-only
         torch.save(model.state_dict(), out / f"{name}_last.pt")
 
-    # final: load best, eval test + val, save an in-distribution montage (FID computed here)
-    if (out / f"{name}_best.pt").exists():
-        model.load_state_dict(torch.load(out / f"{name}_best.pt", map_location=device))
+    # final: load the selected checkpoint, eval test + val, save an in-distribution montage.
+    # --eval-ckpt last is the recovery path when best-ckpt selection ran under noisy
+    # (unseeded) validation and may not have picked the genuinely best epoch.
+    which = getattr(args, "eval_ckpt", "best")
+    ckpt_p = out / f"{name}_{which}.pt"
+    if not ckpt_p.exists():
+        ckpt_p = out / f"{name}_{'last' if which == 'best' else 'best'}.pt"
+    if ckpt_p.exists():
+        log.info(f"eval: loading {ckpt_p.name}")
+        model.load_state_dict(torch.load(ckpt_p, map_location=device))
     model.eval()
     fid_flag = getattr(args, "compute_fid", True)
     evaluate2d(gen, test, device, "TEST", compute_fid_flag=fid_flag)
