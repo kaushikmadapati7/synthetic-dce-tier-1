@@ -132,7 +132,7 @@ def main():
         _fit_scaling_2d(fs, train, device)
         model = LatentFlowMatching2D(fs, cond_ch=3, base=args.base_ch).to(device)
         opt = torch.optim.Adam(model.unet.parameters(), lr=args.lr)
-        gen = lambda c: model.sample(c, steps=args.sample_steps).clamp(-1, 1)
+        gen = lambda c: model.sample(c, steps=args.sample_steps, seed=args.seed).clamp(-1, 1)
         log.info(f"2D MedVAE-latent flow: {fs.model_name} latent_ch={fs.latent_channels}, "
                  f"UNet {sum(p.numel() for p in model.unet.parameters())/1e6:.1f}M "
                  f"(anchor_weight={getattr(args, 'anchor_weight', 0.0)})")
@@ -140,7 +140,7 @@ def main():
         model = FlowMatching2D(cond_ch=3, base=args.base_ch,
                                source=getattr(args, "flow_source", "noise")).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-        gen = lambda c: model.sample(c, steps=args.sample_steps).clamp(-1, 1)
+        gen = lambda c: model.sample(c, steps=args.sample_steps, seed=args.seed).clamp(-1, 1)
         log.info(f"2D flow: {sum(p.numel() for p in model.parameters())/1e6:.1f}M source={model.source}")
     else:                                         # pix2pix 2D GAN
         model = Generator2D(in_ch=3, out_ch=1, base=args.base_ch).to(device)

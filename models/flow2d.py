@@ -91,10 +91,15 @@ class FlowMatching2D(nn.Module):
         return roi_weighted_mse(v_pred, v_target, mask, roi_weight)
 
     @torch.no_grad()
-    def sample(self, cond, steps=50):
+    def sample(self, cond, steps=50, seed=None):
+        """`seed` fixes the ODE start point. Unseeded sampling makes every
+        validation integrate from different noise, which shows up as large
+        epoch-to-epoch swings in the metrics and makes best-checkpoint
+        selection partly a lottery."""
         b = cond.size(0)
+        g = torch.Generator(device=cond.device).manual_seed(int(seed)) if seed is not None else None
         z = (cond[:, 0:1] if self.source == "t2w"
-             else torch.randn(b, 1, *cond.shape[2:], device=cond.device))
+             else torch.randn(b, 1, *cond.shape[2:], device=cond.device, generator=g))
         ts = torch.linspace(1.0, 0.0, steps + 1, device=cond.device)
         for i in range(steps):
             t, tn = ts[i], ts[i + 1]
@@ -174,8 +179,14 @@ class LatentFlowMatching2D(nn.Module):
         return loss
 
     @torch.no_grad()
-    def sample(self, cond, steps=50):
-        z = torch.randn_like(self.encode(cond[:, 0:1]))    # probe latent shape, then start from noise
+    def sample(self, cond, steps=50, seed=None):
+        """`seed` fixes the ODE start point (see FlowMatching2D.sample)."""
+        probe = self.encode(cond[:, 0:1])                  # probe latent shape
+        if seed is None:
+            z = torch.randn_like(probe)
+        else:
+            g = torch.Generator(device=probe.device).manual_seed(int(seed))
+            z = torch.randn(probe.shape, device=probe.device, dtype=probe.dtype, generator=g)
         cond_ds = self._ds(cond, z.shape[2:])
         ts = torch.linspace(1.0, 0.0, steps + 1, device=cond.device)
         for i in range(steps):
