@@ -184,6 +184,11 @@ def main():
         msg = "  ".join(f"{k}={v/max(1,len(train)):.4f}" for k, v in agg.items())
         log.info(f"[epoch {epoch+1}/{args.epochs}] {msg}  ({time.time()-t0:.1f}s)")
 
+        if (epoch + 1) % args.ckpt_every == 0 or epoch + 1 == args.epochs:
+            # roll _last.pt DURING training, not only after the loop: these runs
+            # regularly hit the SLURM wall, and a walled-out run previously left only
+            # _best.pt (chosen mid-training) with no final checkpoint at all.
+            torch.save(model.state_dict(), out / f"{name}_last.pt")
         if val is not None and ((epoch + 1) % args.ckpt_every == 0 or epoch + 1 == args.epochs):
             model.eval()
             m, _ = evaluate2d(gen, val, device, "VAL", compute_fid_flag=False)  # FID is slow; skip during selection
