@@ -32,7 +32,8 @@ def roi_radiomics(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
     from one that preserves focal enhancement. SSIM/PSNR are ~99% background and
     even ROI-SSIM rewards the smooth blob; these target the enhancement signal
     directly. Computed over masked voxels (pred and target share the mask, so the
-    voxel sets align 1:1), pooled across whatever is in the batch.
+    voxel sets align 1:1), PER SAMPLE and then averaged -- never pooled across the
+    batch, which would mix between-patient variance into every statistic.
 
       roi_pearson    voxelwise Pearson r(pred, target): spatial co-localization of
                      enhancement -- does the bright spot land in the right place
@@ -167,14 +168,22 @@ def zone_metrics(pred: torch.Tensor, target: torch.Tensor, zones: torch.Tensor |
     out = {}
     if zones is None or zones.sum() == 0:
         return out
+    # per sample then averaged, for the same reason as roi_radiomics: pooling the
+    # batch lets between-patient brightness inflate a within-zone correlation.
     for name, lbl in (("pz", 2), ("tz", 1)):
-        zm = (zones.round() == lbl).float()
-        r = _masked_pearson(pred, target, zm)
-        if r is not None:
-            out[f"roi_pearson_{name}"] = r
+        rs, es = [], []
+        for i in range(pred.shape[0]):
+            zm = (zones[i].round() == lbl).float()
+            r = _masked_pearson(pred[i], target[i], zm)
+            if r is None:
+                continue
+            rs.append(r)
             m = zm > 0.5
-            out[f"roi_p75_err_{name}"] = float(
-                (pred[m].float().quantile(0.75) - target[m].float().quantile(0.75)).abs())
+            es.append(float((pred[i][m].float().quantile(0.75)
+                             - target[i][m].float().quantile(0.75)).abs()))
+        if rs:
+            out[f"roi_pearson_{name}"] = sum(rs) / len(rs)
+            out[f"roi_p75_err_{name}"] = sum(es) / len(es)
     return out
 
 
@@ -212,10 +221,23 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor,
         "mae": float(F.l1_loss(pred, target)),
     }
     if mask is not None and mask.sum() > 0:
-        m = mask > 0.5
-        out["mae_roi"] = float((pred[m] - target[m]).abs().mean())
-        out["psnr_roi"] = float(psnr(pred[m], target[m]))
-        out["ssim_roi"] = float(ssim3d(pred, target, return_map=True)[m].mean())
+        # ROI scalars per sample, then averaged: pooling batch voxels weights each
+        # patient by gland size (and, for PSNR, log of a pooled MSE is not the mean
+        # of per-case PSNRs). The global ssim/mae above are safe to pool because
+        # every volume has the same fixed spatial_size.
+        smap = ssim3d(pred, target, return_map=True)
+        maes, psnrs, ssims = [], [], []
+        for i in range(pred.shape[0]):
+            mi = mask[i] > 0.5
+            if mi.sum() < 16:
+                continue
+            maes.append(float((pred[i][mi] - target[i][mi]).abs().mean()))
+            psnrs.append(float(psnr(pred[i][mi], target[i][mi])))
+            ssims.append(float(smap[i][mi].mean()))
+        if maes:
+            out["mae_roi"] = sum(maes) / len(maes)
+            out["psnr_roi"] = sum(psnrs) / len(psnrs)
+            out["ssim_roi"] = sum(ssims) / len(ssims)
         out.update(roi_radiomics(pred, target, mask))
         out.update(roi_sharpness(pred, target, mask))
         out.update(zone_metrics(pred, target, zones))
