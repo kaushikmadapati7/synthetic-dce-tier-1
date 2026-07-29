@@ -37,6 +37,18 @@ PERCEPTUAL=${PERCEPTUAL:-0.1}
 PERCEPTUAL_DEPTH=${PERCEPTUAL_DEPTH:-18}
 MEDICALNET_WEIGHTS=${MEDICALNET_WEIGHTS:-pretrain/resnet_${PERCEPTUAL_DEPTH}.pth}
 TEST_HOSPITALS=${TEST_HOSPITALS:-jiulong}
+# ---- UCSF cohort (set UCSF_ROOT to switch off the Bao layout entirely) ---------
+# 2D is where a flow can actually be trained to convergence: slicing turns ~3.2k
+# volumes into ~43k slices AND each step is ~6x cheaper, so a 24h run does ~200k
+# steps instead of ~35k.
+UCSF_ROOT=${UCSF_ROOT:-}                      # staged root from stage_ucsf.py
+UCSF_TEST_FRAC=${UCSF_TEST_FRAC:-0.15}
+FIRST_STAGE=${FIRST_STAGE:-vae}               # vae | medvae (2D: use medvae_4_1_2d)
+MEDVAE_MODEL=${MEDVAE_MODEL:-medvae_4_1_2d}   # 1-CHANNEL 2D model (…_4_3_2d is 3-channel)
+ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # image-space anchor for the latent flow
+ANCHOR_T_MAX=${ANCHOR_T_MAX:-0.3}
+USE_PREGAD=${USE_PREGAD:-0}                   # 1 = pre-contrast T1 as a 4th cond channel
+COMPUTE_FID=${COMPUTE_FID:-0}                 # 1 = FID on (needs cached Inception weights)
 EXTRA_ARGS=${EXTRA_ARGS:-}
 
 cd "${SLURM_SUBMIT_DIR:-.}"; mkdir -p logs
@@ -44,11 +56,21 @@ set +u
 CONDA_BASE=$(conda info --base 2>/dev/null || echo "${HOME}/miniconda3")
 source "${CONDA_BASE}/etc/profile.d/conda.sh"; conda activate "${CONDA_ENV}"; set -u
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} px2d  data=${DATA_ROOT} out=${OUTPUT_DIR}"
+# data source: UCSF (patient-level split) or the Bao silver layout
+DATA_ARGS=(--data-root "${DATA_ROOT}" --test-hospitals ${TEST_HOSPITALS})
+if [ -n "${UCSF_ROOT}" ]; then
+  DATA_ARGS=(--ucsf-main-root "${UCSF_ROOT}" --ucsf-test-frac "${UCSF_TEST_FRAC}")
+fi
+if [ "${USE_PREGAD}" = "1" ]; then DATA_ARGS+=(--use-pregad); fi
+FS_ARGS=(--first-stage "${FIRST_STAGE}")
+if [ "${FIRST_STAGE}" = "medvae" ]; then FS_ARGS+=(--medvae-model "${MEDVAE_MODEL}"); fi
+FID_ARG=--no-fid; if [ "${COMPUTE_FID}" = "1" ]; then FID_ARG=--compute-fid; fi
+echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} px2d  cohort=${UCSF_ROOT:-$DATA_ROOT} out=${OUTPUT_DIR}"
 
 srun python -m tier1_static.main2d \
   --model "${MODEL}" --sample-steps "${SAMPLE_STEPS}" \
-  --data-root "${DATA_ROOT}" --output-dir "${OUTPUT_DIR}" \
+  "${DATA_ARGS[@]}" "${FS_ARGS[@]}" --output-dir "${OUTPUT_DIR}" \
+  --anchor-weight "${ANCHOR_WEIGHT}" --anchor-t-max "${ANCHOR_T_MAX}" \
   --spatial-size ${SPATIAL_SIZE} --epochs "${EPOCHS}" --batch-size "${BATCH_SIZE}" \
   --base-ch "${BASE_CH}" --lr "${LR}" --ckpt-every "${CKPT_EVERY}" --val-frac "${VAL_FRAC}" \
   --num-workers "${SLURM_CPUS_PER_TASK:-8}" \
@@ -56,5 +78,5 @@ srun python -m tier1_static.main2d \
   --roi-weight "${ROI_WEIGHT}" --adv-weight "${ADV_WEIGHT}" \
   --perceptual "${PERCEPTUAL}" --perceptual-depth "${PERCEPTUAL_DEPTH}" \
   --medicalnet-weights "${MEDICALNET_WEIGHTS}" \
-  --test-hospitals ${TEST_HOSPITALS} --no-fid ${EXTRA_ARGS}
+  ${FID_ARG} ${EXTRA_ARGS}
 echo "done -> ${OUTPUT_DIR}"
