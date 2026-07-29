@@ -39,8 +39,18 @@ from .main2d import _fit_scaling_2d
 log = logging.getLogger("tier1")
 
 
-def _dce_ref(data_root, image_subdir, case_id):
-    """Native DCE image for `case_id` (= its target geometry)."""
+def _dce_ref(data_root, image_subdir, case_id, ucsf_root=None):
+    """Native DCE image for `case_id` (= its target geometry).
+
+    UCSF ids are a bare patient id in a flat staged tree (<staged>/<pid>/), not the
+    Bao `<center>/<subject>` layout, so try that first.
+    """
+    if ucsf_root:
+        p = _resolve_stem(Path(ucsf_root) / case_id, ["DCE_to_T2W", "DCE"])
+        if p is not None:
+            return load_sitk(p)
+    if "/" not in case_id:
+        return None
     center, subject = case_id.split("/", 1)
     d = Path(data_root) / image_subdir / center / subject
     p = _resolve_stem(d, MODALITY_STEMS["dce"])
@@ -117,7 +127,8 @@ def main():
                 # (3,D,H,W) -> (D,3,H,W): D slices as one batch through the 2D model
                 cslices = batch["cond"][i].permute(1, 0, 2, 3).to(device)
                 vol = gen(cslices)[:, 0].cpu().numpy()  # (D,H,W) on the cropped grid
-                ref = _dce_ref(args.data_root, args.image_subdir, cid)
+                ref = _dce_ref(args.data_root, args.image_subdir, cid,
+                              getattr(args, 'ucsf_main_root', ''))
                 if ref is None:
                     log.warning(f"no DCE ref for {cid}; skipping"); continue
                 native = sitk.GetArrayFromImage(ref).shape
