@@ -42,23 +42,33 @@ def roi_radiomics(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
       roi_w1         1-Wasserstein distance of the ROI intensity distributions,
                      normalized to [0,1] (0 = identical histograms)
     """
-    m = mask > 0.5
-    if m.sum() < 16:
-        return {}
-    p, t = pred[m].flatten().float(), target[m].flatten().float()
-    pc, tc = p - p.mean(), t - t.mean()
-    denom = (pc.norm() * tc.norm()).clamp(min=1e-8)
-    w1 = (p.sort().values - t.sort().values).abs().mean() / 2.0   # /2: [-1,1] span -> [0,1]
-    # var_ratio is a ratio with a small denominator -> a near-flat target ROI
-    # (low-enhancement case) blows it up and wrecks the mean. Cap per-case at 5
-    # so "much too noisy" reads ~5 instead of thousands; aggregate stays robust.
-    var_ratio = min(float(p.var(unbiased=False) / (t.var(unbiased=False) + 1e-6)), 5.0)
-    return {
-        "roi_pearson": float((pc * tc).sum() / denom),
-        "roi_var_ratio": var_ratio,
-        "roi_p75_err": float((p.quantile(0.75) - t.quantile(0.75)).abs()),
-        "roi_w1": float(w1),
-    }
+    # PER SAMPLE, then averaged. Pooling every masked voxel in the batch into one
+    # vector (the previous behaviour) mixes BETWEEN-patient brightness variance into
+    # each statistic, which is both wrong and batch-size dependent: on data where
+    # per-patient brightness is predicted perfectly but within-gland structure is
+    # pure noise, pooling reports roi_pearson +0.977 where the truth is +0.020, and
+    # the value climbs with batch size (0.66 at B=2 -> 0.98 at B=8). Cross-patient
+    # tracking is what p75_corr measures; roi_pearson must stay within-gland.
+    acc, n = {}, 0
+    for i in range(pred.shape[0]):
+        m = mask[i] > 0.5
+        if m.sum() < 16:
+            continue
+        p, t = pred[i][m].flatten().float(), target[i][m].flatten().float()
+        pc, tc = p - p.mean(), t - t.mean()
+        denom = (pc.norm() * tc.norm()).clamp(min=1e-8)
+        w1 = (p.sort().values - t.sort().values).abs().mean() / 2.0  # /2: [-1,1] -> [0,1]
+        # var_ratio is a ratio with a small denominator -> a near-flat target ROI
+        # (low-enhancement case) blows it up and wrecks the mean. Cap per-case at 5
+        # so "much too noisy" reads ~5 instead of thousands; aggregate stays robust.
+        var_ratio = min(float(p.var(unbiased=False) / (t.var(unbiased=False) + 1e-6)), 5.0)
+        for k, v in (("roi_pearson", float((pc * tc).sum() / denom)),
+                     ("roi_var_ratio", var_ratio),
+                     ("roi_p75_err", float((p.quantile(0.75) - t.quantile(0.75)).abs())),
+                     ("roi_w1", float(w1))):
+            acc[k] = acc.get(k, 0.0) + v
+        n += 1
+    return {k: v / n for k, v in acc.items()} if n else {}
 
 
 @torch.no_grad()
@@ -74,9 +84,6 @@ def roi_sharpness(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
                       spatial-frequency view -- a smooth blob has low grad_ratio
                       even if its variance happens to match.
     """
-    m = mask > 0.5
-    if m.sum() < 16:
-        return {}
     def gmag(v):
         v = v.float()
         dims = tuple(d for d in (-3, -2, -1) if v.shape[d] >= 2)  # skip singleton (2D: depth=1)
@@ -84,9 +91,18 @@ def roi_sharpness(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
         if not isinstance(gs, (list, tuple)):
             gs = (gs,)
         return torch.sqrt(sum(g ** 2 for g in gs) + 1e-12)
+    # per sample, then averaged (mean of ratios, not ratio of batch means) so that
+    # high-gradient cases cannot dominate and the value is batch-size independent --
+    # matching roi_radiomics.
     gp, gt = gmag(pred), gmag(target)
-    mp, mt = gp[m].mean(), gt[m].mean()
-    return {"roi_grad_ratio": min(float(mp / (mt + 1e-6)), 5.0)}
+    tot, n = 0.0, 0
+    for i in range(pred.shape[0]):
+        m = mask[i] > 0.5
+        if m.sum() < 16:
+            continue
+        tot += min(float(gp[i][m].mean() / (gt[i][m].mean() + 1e-6)), 5.0)
+        n += 1
+    return {"roi_grad_ratio": tot / n} if n else {}
 
 
 # Keys that make up the label-free "realism panel" (how real it looks to a reader),
