@@ -167,7 +167,11 @@ def main():
                 opt.zero_grad(); loss.backward(); opt.step()
                 agg["diff"] = agg.get("diff", 0.0) + float(loss.detach())
             elif is_flow:
-                loss = model.loss(real, cond, mask=_w5(mask), roi_weight=args.roi_weight)
+                # 4D mask: FlowMatching2D velocities are (B,1,H,W). Passing _w5(mask)
+                # here broadcast (B,1,H,W) against (B,1,1,H,W) into a (B,B,...) outer
+                # product, so each sample's error was weighted by the BATCH-AVERAGE
+                # mask instead of its own prostate -- silently destroying ROI emphasis.
+                loss = model.loss(real, cond, mask=mask, roi_weight=args.roi_weight)
                 opt.zero_grad(); loss.backward(); opt.step()
                 agg["diff"] = agg.get("diff", 0.0) + float(loss.detach())
             else:

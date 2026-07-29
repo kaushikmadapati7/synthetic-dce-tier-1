@@ -81,6 +81,8 @@ class FlowMatching2D(nn.Module):
         return cond[:, 0:1] if self.source == "t2w" else torch.randn_like(x1)
 
     def loss(self, x1, cond, mask=None, roi_weight=1.0):
+        if mask is not None and mask.dim() == 5:      # accept (B,1,1,H,W) from _w5()
+            mask = mask.squeeze(2)
         b = x1.shape[0]
         t = torch.rand(b, device=x1.device)
         src = self._src(x1, cond)

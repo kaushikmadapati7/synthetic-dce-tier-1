@@ -37,6 +37,11 @@ def roi_weighted_mse(pred, target, mask=None, roi_weight=1.0, channel_weight=Non
         se = se * channel_weight.view(1, -1, *([1] * (se.dim() - 2)))
     if mask is None or roi_weight <= 1.0:
         return se.mean()
+    if mask.dim() != se.dim():
+        raise ValueError(
+            f"roi_weighted_mse: mask.dim()={mask.dim()} but pred.dim()={se.dim()}. "
+            "Mismatched ranks broadcast into a (B,B,...) outer product, which silently "
+            "weights each sample by the BATCH-AVERAGE mask and destroys ROI emphasis.")
     w = 1.0 + (roi_weight - 1.0) * mask        # (B,1,...) broadcasts over latent channels
     return (se * w).mean() / w.mean()          # weighted mean -> stable scale
 
