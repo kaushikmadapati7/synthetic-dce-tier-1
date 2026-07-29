@@ -148,19 +148,123 @@ def g_total_loss(fake_logits, fake, real, criterion=None, adv_weight=1.0, mask=N
     return total, parts
 
 
-class ConditionalGAN3D(nn.Module):
-    """Convenience wrapper bundling G and D plus the sampling helper."""
+def _stride_schedule(spatial_size, n_levels, min_dim=2):
+    """Per-level (D,H,W) strides that never shrink an axis below `min_dim`.
 
-    def __init__(self, **kwargs):
+    Inputs here are strongly anisotropic (e.g. 32x192x192): striding every axis by 2
+    at every level would drive depth to 1 long before the in-plane axes are reduced.
+    Each axis is halved only while it can afford it, so depth keeps >=2 slices.
+    """
+    cur = list(spatial_size)
+    sched = []
+    for _ in range(n_levels):
+        s = tuple(2 if c // 2 >= min_dim else 1 for c in cur)
+        cur = [c // st for c, st in zip(cur, s)]
+        sched.append(s)
+    return sched
+
+
+def _dn3(ic, oc, stride, norm=True):
+    k = tuple(4 if s == 2 else 3 for s in stride)
+    layers = [nn.Conv3d(ic, oc, k, stride, 1, bias=not norm)]
+    if norm:
+        layers.append(_norm(oc))
+    layers.append(nn.LeakyReLU(0.2, True))
+    return nn.Sequential(*layers)
+
+
+def _up3(ic, oc, stride, drop=False):
+    k = tuple(4 if s == 2 else 3 for s in stride)
+    layers = [nn.ConvTranspose3d(ic, oc, k, stride, 1, bias=False), _norm(oc)]
+    if drop:
+        layers.append(nn.Dropout3d(0.5))
+    layers.append(nn.ReLU(True))
+    return nn.Sequential(*layers)
+
+
+class UNetGenerator3D(nn.Module):
+    """pix2pix-style 3D U-Net: cond volume -> DCE, tanh output.
+
+    Replaces Generator3D for image-to-image translation. Generator3D projects a noise
+    vector to a tiny grid and fuses the condition through AdaptiveAvgPool3d(init_size)
+    -- at 32x192x192 with n_upsamples=4 that pools the entire 3-channel anatomy into a
+    2x12x12 summary with NO skip connections, so the generator cannot see fine
+    structure and can only emit a smooth blob at roughly the right brightness. That is
+    the 3D counterpart of our 2D pix2pix generator, which has full skips and produced
+    crisp output.
+
+    Deterministic by construction (no z): stochasticity comes from decoder dropout, as
+    in pix2pix, which also makes evaluation reproducible.
+    """
+
+    def __init__(self, in_channels=3, out_channels=1, base_ch=32, n_levels=5,
+                 spatial_size=(32, 192, 192)):
         super().__init__()
-        g_keys = {"z_dim", "out_channels", "cond_channels", "num_classes",
-                  "base_ch", "init_size", "n_upsamples"}
+        self.strides = _stride_schedule(spatial_size, n_levels)
+        chs = [base_ch * min(2 ** i, 8) for i in range(n_levels)]      # cap growth at 8x
+        self.downs = nn.ModuleList()
+        ic = in_channels
+        for i, oc in enumerate(chs):
+            self.downs.append(_dn3(ic, oc, self.strides[i], norm=(i > 0)))
+            ic = oc
+        self.ups = nn.ModuleList()
+        for i in range(n_levels - 1, 0, -1):
+            skip = chs[i - 1]
+            first = i == n_levels - 1
+            self.ups.append(_up3(chs[i] if first else chs[i] + chs[i], skip,
+                                 self.strides[i], drop=(i >= n_levels - 2)))
+        self.out = nn.Sequential(
+            nn.ConvTranspose3d(chs[0] * 2, out_channels,
+                               tuple(4 if s == 2 else 3 for s in self.strides[0]),
+                               self.strides[0], 1),
+            nn.Tanh())
+
+    def forward(self, cond_vol):
+        feats = []
+        h = cond_vol
+        for d in self.downs:
+            h = d(h); feats.append(h)
+        h = feats[-1]
+        for j, u in enumerate(self.ups):
+            h = u(h if j == 0 else torch.cat([h, feats[-1 - j]], 1))
+        return self.out(torch.cat([h, feats[0]], 1))
+
+
+class ConditionalGAN3D(nn.Module):
+    """Convenience wrapper bundling G and D plus the sampling helper.
+
+    generator='unet' (default) uses the pix2pix-style UNetGenerator3D; 'resnet' keeps
+    the original noise-vector Generator3D (kept for reproducing older runs).
+    """
+
+    def __init__(self, generator: str = "unet", **kwargs):
+        super().__init__()
+        self.generator_type = generator
         d_keys = {"in_channels", "cond_channels", "num_classes", "base_ch", "n_downsamples"}
-        self.generator = Generator3D(**{k: v for k, v in kwargs.items() if k in g_keys})
+        if generator == "unet":
+            self.generator = UNetGenerator3D(
+                in_channels=kwargs.get("cond_channels", 3),
+                out_channels=kwargs.get("out_channels", 1),
+                base_ch=kwargs.get("base_ch", 32),
+                spatial_size=kwargs.get("spatial_size", (32, 192, 192)))
+            self.z_dim = 0
+        else:
+            g_keys = {"z_dim", "out_channels", "cond_channels", "num_classes",
+                      "base_ch", "init_size", "n_upsamples"}
+            self.generator = Generator3D(**{k: v for k, v in kwargs.items() if k in g_keys})
+            self.z_dim = self.generator.z_dim
         self.discriminator = Discriminator3D(**{k: v for k, v in kwargs.items() if k in d_keys})
-        self.z_dim = self.generator.z_dim
+
+    def generate(self, cond_vol, labels=None):
+        """Forward pass used for both training and eval (deterministic for 'unet')."""
+        if self.generator_type == "unet":
+            return self.generator(cond_vol)
+        z = torch.randn(cond_vol.size(0), self.z_dim, device=cond_vol.device)
+        return self.generator(z, cond_vol=cond_vol, labels=labels)
 
     @torch.no_grad()
     def sample(self, n, device, cond_vol=None, labels=None):
+        if self.generator_type == "unet":
+            return self.generator(cond_vol)
         z = torch.randn(n, self.z_dim, device=device)
         return self.generator(z, cond_vol=cond_vol, labels=labels)

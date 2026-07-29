@@ -24,8 +24,11 @@ def _build_gan(args, device):
     # discriminator depth is capped by the smallest dim (kernel-4 stride-2 needs dim>=2 each step):
     # layers = n_down+1 must satisfy 2**layers <= min_dim
     n_down = min(n_up, max(1, int(math.log2(min(args.spatial_size))) - 1))
-    return ConditionalGAN3D(z_dim=args.z_dim, out_channels=1, cond_channels=(4 if getattr(args, 'use_pregad', False) else 3),
+    return ConditionalGAN3D(generator=getattr(args, "gan_generator", "unet"),
+                            z_dim=args.z_dim, out_channels=1,
+                            cond_channels=(4 if getattr(args, 'use_pregad', False) else 3),
                             base_ch=args.base_ch, init_size=init, n_upsamples=n_up,
+                            spatial_size=tuple(args.spatial_size),
                             in_channels=1, n_downsamples=n_down).to(device)
 
 
@@ -40,6 +43,8 @@ def _gan_gen(gan, args, device):
     reproducible and z is held constant across models being compared.
     """
     def gen(cond):
+        if gan.generator_type == "unet":          # deterministic by construction
+            return gan.generator(cond)
         g = torch.Generator(device=cond.device).manual_seed(int(args.seed))
         z = torch.randn(cond.size(0), gan.z_dim, device=cond.device, generator=g)
         return gan.generator(z, cond_vol=cond)
@@ -72,9 +77,7 @@ def train_gan(args, train_loader, val_loader, test_loader, criterion, device):
             cond = batch["cond"].to(device); real = batch["target"].to(device)
             mask = batch["mask"].to(device)
             zone_weight = batch["zone_weight"].to(device) if "zone_weight" in batch else None
-            z = torch.randn(cond.size(0), args.z_dim, device=device)
-
-            fake = gan.generator(z, cond_vol=cond)
+            fake = gan.generate(cond)
             d_loss = d_hinge_loss(gan.discriminator(real, cond_vol=cond),
                                   gan.discriminator(fake.detach(), cond_vol=cond))
             opt_d.zero_grad(); d_loss.backward(); opt_d.step()

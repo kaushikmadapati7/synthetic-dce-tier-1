@@ -351,6 +351,11 @@ def parse_args():
     p.add_argument("--dwi-bvalue", default="",
                    help="preferred UCSF DWI b-value for the DWI channel (e.g. 1000); "
                         "empty/'auto' = highest available (b1000 -> b0600 -> ...)")
+    p.add_argument("--gan-generator", default="unet", choices=["unet", "resnet"],
+                   help="3D GAN generator. 'unet' = pix2pix-style with skip connections "
+                        "(default). 'resnet' = the original noise-vector generator, which "
+                        "pools the whole conditioning volume to the bottleneck grid "
+                        "(0.02%% of input detail, no skips) and can only emit smooth blobs.")
     p.add_argument("--audit-split", default="val", choices=["val","test","train"],
                    help="split for tier1_static.audit_baselines")
     p.add_argument("--use-pregad", action="store_true", default=False,
