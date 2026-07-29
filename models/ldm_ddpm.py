@@ -98,18 +98,23 @@ class LDM_DDPM(CFGMixin, nn.Module):
         return mean + torch.sqrt(var) * torch.randn_like(zt)
 
     @torch.no_grad()
-    def sample(self, shape, device, cond=None, labels=None, decode=True, guidance_scale=1.0):
-        zt = torch.randn(shape, device=device)
+    def sample(self, shape, device, cond=None, labels=None, decode=True,
+               guidance_scale=1.0, seed=None):
+        zt = (torch.randn(shape, device=device) if seed is None else
+              torch.randn(shape, device=device,
+                          generator=torch.Generator(device=device).manual_seed(int(seed))))
         for i in reversed(range(self.timesteps)):
             t = torch.full((shape[0],), i, device=device, dtype=torch.long)
             zt = self.p_sample(zt, t, cond=cond, labels=labels, guidance_scale=guidance_scale)
         return self.decode(zt) if decode and self.autoencoder is not None else zt
 
     @torch.no_grad()
-    def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None,
+    def ddim_sample(self, shape, device, steps=50, eta=0.0, cond=None, labels=None, seed=None,
                     decode=True, x0_clamp=0.0, guidance_scale=1.0):
         seq = torch.linspace(self.timesteps - 1, 0, steps, device=device).long()
-        zt = torch.randn(shape, device=device)
+        zt = (torch.randn(shape, device=device) if seed is None else
+              torch.randn(shape, device=device,
+                          generator=torch.Generator(device=device).manual_seed(int(seed))))
         for i in range(steps):
             t = torch.full((shape[0],), seq[i], device=device, dtype=torch.long)
             eps = self._guided(zt, t.float(), cond, labels, guidance_scale)

@@ -106,10 +106,19 @@ class LDM_FlowMatching(CFGMixin, nn.Module):
     # ---- sampling: integrate the probability-flow ODE from noise (t=1) to data (t=0) ----
     @torch.no_grad()
     def sample(self, shape, device, steps=50, cond=None, labels=None,
-               solver="heun", decode=True, guidance_scale=1.0, source=None):
+               solver="heun", decode=True, guidance_scale=1.0, source=None, seed=None):
         # start the ODE from the source latent (e.g. encoded T2w) when given,
-        # otherwise from noise -- must match how the model was trained
-        z = source if source is not None else torch.randn(shape, device=device)
+        # otherwise from noise -- must match how the model was trained.
+        # `seed` fixes the start point: unseeded sampling makes every validation
+        # integrate from different noise, so one checkpoint scores differently on
+        # each eval and best-ckpt selection becomes partly a lottery.
+        if source is not None:
+            z = source
+        elif seed is None:
+            z = torch.randn(shape, device=device)
+        else:
+            g = torch.Generator(device=device).manual_seed(int(seed))
+            z = torch.randn(shape, device=device, generator=g)
         ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
         for i in range(steps):
             t, t_next = ts[i], ts[i + 1]

@@ -354,6 +354,12 @@ class CustomLoss(nn.Module):
                 zone_weight: torch.Tensor | None = None):
         use_roi = self._has_roi(mask)
         has_mask = mask is not None and mask.sum() > 0
+        # A rank mismatch here would broadcast into a (B,B,...) outer product and
+        # silently weight every sample by the batch-average mask instead of its own
+        # (the bug that disabled ROI emphasis in the 2D pixel flow). Fail loudly.
+        for nm, t in (("mask", mask), ("zone_weight", zone_weight)):
+            if t is not None and t.dim() != pred.dim():
+                raise ValueError(f"CustomLoss: {nm}.dim()={t.dim()} != pred.dim()={pred.dim()}")
 
         # L1: reweighted so ROI voxels dominate the gradient (also lifts ROI PSNR).
         # zone_weight (PZ/TZ map, default all-ones) further emphasizes the PZ where

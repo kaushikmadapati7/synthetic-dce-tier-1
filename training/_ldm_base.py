@@ -112,11 +112,16 @@ def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
         cond = prep_cond(cond, args, training=False)   # Layer-1: fixed --eval-modalities subset
         cond_ds = downsample_cond(cond, lat_spatial)
         shape = (cond.size(0), lat_ch, *lat_spatial)
+        # seed the sampler so repeated evaluations of one checkpoint agree (otherwise
+        # every validation starts the ODE/chain from different noise and best-ckpt
+        # selection is partly a lottery)
+        sd = int(getattr(args, "seed", 0))
         if flow:
             return ldm.sample(shape, device, steps=args.sample_steps, cond=cond_ds,
-                              guidance_scale=w, source=source)
+                              guidance_scale=w, source=source, seed=sd)
         return ldm.ddim_sample(shape, device, steps=args.sample_steps, cond=cond_ds,
-                               x0_clamp=getattr(args, "x0_clamp", 3.0), guidance_scale=w)
+                               x0_clamp=getattr(args, "x0_clamp", 3.0), guidance_scale=w,
+                               seed=sd)
     return gen
 
 
