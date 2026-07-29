@@ -19,13 +19,33 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # 3D SSIM
 # ---------------------------------------------------------------------------
-def _gaussian_window_3d(window_size: int, sigma: float, channels: int,
+def _odd_at_most(n: int, cap: int) -> int:
+    """Largest odd window <= min(n, cap), at least 1."""
+    k = min(n, cap)
+    return max(1, k if k % 2 == 1 else k - 1)
+
+
+def _gaussian_window_3d(sizes, sigma: float, channels: int,
                         device, dtype) -> torch.Tensor:
-    coords = torch.arange(window_size, device=device, dtype=dtype) - window_size // 2
-    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-    g = g / g.sum()
-    w = g[:, None, None] * g[None, :, None] * g[None, None, :]
-    return w.expand(channels, 1, window_size, window_size, window_size).contiguous()
+    """Separable Gaussian window with a PER-AXIS size.
+
+    Each axis is normalized independently, so an axis shorter than the nominal
+    window (e.g. a depth-1 slice) contributes a single unit-weight tap rather than
+    being padded with zeros. Zero-padding an axis silently rescales the local mean
+    -- at depth 1 only 0.271 of the 7-tap depth weight lands on real data, which
+    turns mu into 0.271*mu, breaks the mean subtraction in the variance terms, and
+    INFLATES SSIM (worst for poor predictions: 3.1x on a blurred pair, 4.7x on
+    noise). That made 2D SSIM optimistic and non-comparable to 3D.
+    """
+    if isinstance(sizes, int):
+        sizes = (sizes,) * 3
+    gs = []
+    for ws in sizes:
+        coords = torch.arange(ws, device=device, dtype=dtype) - ws // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        gs.append(g / g.sum())
+    w = gs[0][:, None, None] * gs[1][None, :, None] * gs[2][None, None, :]
+    return w.expand(channels, 1, *sizes).contiguous()
 
 
 def ssim3d(x: torch.Tensor, y: torch.Tensor, window_size: int = 7,
@@ -37,8 +57,10 @@ def ssim3d(x: torch.Tensor, y: torch.Tensor, window_size: int = 7,
     as the input) when ``return_map`` — used to average SSIM inside an ROI mask.
     """
     c = x.shape[1]
-    w = _gaussian_window_3d(window_size, sigma, c, x.device, x.dtype)
-    pad = window_size // 2
+    # shrink the window on any axis shorter than it (depth-1 slices -> exact 2D SSIM)
+    sizes = tuple(_odd_at_most(s, window_size) for s in x.shape[-3:])
+    w = _gaussian_window_3d(sizes, sigma, c, x.device, x.dtype)
+    pad = tuple(s // 2 for s in sizes)
     mu_x = F.conv3d(x, w, padding=pad, groups=c)
     mu_y = F.conv3d(y, w, padding=pad, groups=c)
     mu_x2, mu_y2, mu_xy = mu_x ** 2, mu_y ** 2, mu_x * mu_y
