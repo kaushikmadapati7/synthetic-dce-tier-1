@@ -30,7 +30,20 @@ def _build_gan(args, device):
 
 
 def _gan_gen(gan, args, device):
-    return lambda cond: gan.sample(cond.size(0), device, cond_vol=cond)
+    """Deterministic eval sampler.
+
+    `gan.sample()` draws a fresh z on every call, so the SAME checkpoint scored
+    differently on every evaluation -- roi_pearson moved 0.491 -> 0.407 between
+    end-of-training eval and a later eval-only run of those exact weights. That
+    turned the headline metric into a lottery draw and made model-vs-model gaps
+    partly noise. Draw z from a fixed-seed generator instead, so evaluation is
+    reproducible and z is held constant across models being compared.
+    """
+    def gen(cond):
+        g = torch.Generator(device=cond.device).manual_seed(int(args.seed))
+        z = torch.randn(cond.size(0), gan.z_dim, device=cond.device, generator=g)
+        return gan.generator(z, cond_vol=cond)
+    return gen
 
 
 def load_gan(args, train_loader, test_loader, device):
