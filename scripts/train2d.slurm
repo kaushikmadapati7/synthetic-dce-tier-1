@@ -56,6 +56,14 @@ set +u
 CONDA_BASE=$(conda info --base 2>/dev/null || echo "${HOME}/miniconda3")
 source "${CONDA_BASE}/etc/profile.d/conda.sh"; conda activate "${CONDA_ENV}"; set -u
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+# FIRST_STAGE=medvae loads weights from the HF cache; compute nodes have no internet,
+# so point HF_HOME at the pre-downloaded cache and force offline. Without this the
+# 2D MedVAE run dies with "Cannot send a request, as the client has been closed."
+# (harmless for non-MedVAE runs, which never touch HF). TORCH_HOME is where
+# torch_fidelity caches the Inception backbone used for FID.
+export HF_HOME=${HF_HOME:-/mnt/scratch/user/kmadapati/.hf}
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export TORCH_HOME=${TORCH_HOME:-$(pwd)/.torch}
 # data source: UCSF (patient-level split) or the Bao silver layout
 DATA_ARGS=(--data-root "${DATA_ROOT}" --test-hospitals ${TEST_HOSPITALS})
 if [ -n "${UCSF_ROOT}" ]; then
