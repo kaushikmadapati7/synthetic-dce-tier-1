@@ -347,6 +347,56 @@ def run_data_checks():
         assert torch.allclose(p4["cond"][:3], st[0]["cond"]), "first 3 channels changed"
         assert p4["cond"][3].std() > 1e-3, "pre-contrast channel is constant"
 
+    @check("cohort filters read the b-value from stage_meta (staged files are renamed)")
+    def _():
+        # Mirror what stage_ucsf ACTUALLY writes: DWI is copied to a canonical
+        # DWI_to_T2W.nii.gz, so the b-value survives only in stage_meta's dwi_src.
+        # Reading it off the staged filename returns -1 and drops the whole cohort.
+        tmp = Path(tempfile.mkdtemp()); T = tmp / "staged"
+        def mk(pid, bsrc, measured=True):
+            d = T / pid; d.mkdir(parents=True)
+            a = (np.random.rand(4, 16, 16).astype(np.float32) + 1)
+            m = np.zeros((4, 16, 16), np.uint8); m[1:3, 6:10, 6:10] = 1
+            for n in ("T2W", "ADC_to_T2W", "DWI_to_T2W", "DCE_to_T2W", "DCE_pre_to_T2W"):
+                sitk.WriteImage(sitk.GetImageFromArray(a), str(d / f"{n}.nii.gz"))
+            sitk.WriteImage(sitk.GetImageFromArray(m), str(d / "prostate_mask.nii.gz"))
+            (d / "stage_meta.json").write_text(json.dumps(
+                {"pid": pid, "phase_idx": 8, "rel_time_s": 72.0, "n_phases": 12,
+                 "target_time": 120.0, "select_mode": "time", "dwi_src": bsrc,
+                 "enh_ratio": (2.0 if measured else None),
+                 "enh_max": (2.0 if measured else None)}))
+        mk("HIGH", "DWI_b1000_to_T2W.nii.gz")
+        mk("LOW", "DWI_b50_to_T2W.nii.gz")
+        mk("NOQC", "DWI_b1000_to_T2W.nii.gz", measured=False)
+        cfg = PreprocessConfig(spatial_size=(4, 16, 16), reference="dce")
+        assert sorted(UCSFDCEDataset(T, None, cfg).pids) == ["HIGH", "LOW", "NOQC"]
+        assert sorted(UCSFDCEDataset(T, None, cfg, dwi_min_bvalue=600).pids) == ["HIGH", "NOQC"]
+        assert sorted(UCSFDCEDataset(T, None, cfg, require_qc=True).pids) == ["HIGH", "LOW"]
+        assert sorted(UCSFDCEDataset(T, None, cfg, dwi_min_bvalue=600,
+                                     require_qc=True).pids) == ["HIGH"]
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    @check("a filter that removes EVERY case raises instead of yielding an empty split")
+    def _():
+        tmp = Path(tempfile.mkdtemp()); T = tmp / "staged"
+        d = T / "ONLYLOW"; d.mkdir(parents=True)
+        a = (np.random.rand(4, 16, 16).astype(np.float32) + 1)
+        m = np.zeros((4, 16, 16), np.uint8); m[1:3, 6:10, 6:10] = 1
+        for n in ("T2W", "ADC_to_T2W", "DWI_to_T2W", "DCE_to_T2W", "DCE_pre_to_T2W"):
+            sitk.WriteImage(sitk.GetImageFromArray(a), str(d / f"{n}.nii.gz"))
+        sitk.WriteImage(sitk.GetImageFromArray(m), str(d / "prostate_mask.nii.gz"))
+        (d / "stage_meta.json").write_text(json.dumps(
+            {"pid": "ONLYLOW", "dwi_src": "DWI_b50_to_T2W.nii.gz",
+             "enh_ratio": 2.0, "enh_max": 2.0, "select_mode": "time"}))
+        cfg = PreprocessConfig(spatial_size=(4, 16, 16), reference="dce")
+        try:
+            UCSFDCEDataset(T, None, cfg, dwi_min_bvalue=600)
+        except RuntimeError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise AssertionError("empty split did not raise")
+
     @check("--report --prune-below removes weak cases and is idempotent")
     def _():
         stage_main(["--report", "--prune-below", "1.2", "--out", str(OUT)])

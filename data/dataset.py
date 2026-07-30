@@ -527,18 +527,26 @@ class UCSFDCEDataset(Dataset):
             if not (t2 and adc and dwi and mask.exists()):
                 skipped += 1
                 continue
-            if self.dwi_min_bvalue and _dwi_bval(dwi) < self.dwi_min_bvalue:
-                low_b += 1
-                continue
-            if self.require_qc:
-                meta = subj / "stage_meta.json"
-                try:
-                    r = json.loads(meta.read_text())
-                except Exception:
-                    no_qc += 1
+            meta = None
+            if self.dwi_min_bvalue or self.require_qc:
+                mp = subj / "stage_meta.json"
+                if mp.exists():
+                    try:
+                        meta = json.loads(mp.read_text())
+                    except Exception:
+                        meta = None
+            if self.dwi_min_bvalue:
+                # The STAGED copy is renamed to a canonical DWI_to_T2W.nii.gz, so the
+                # b-value survives only in stage_meta.json's dwi_src -- reading it off
+                # the staged filename yields -1 and silently drops the whole cohort.
+                # Raw mode has no metadata but keeps the b-value in the source name.
+                src = (meta or {}).get("dwi_src") or dwi.name
+                if _dwi_bval(Path(src)) < self.dwi_min_bvalue:
+                    low_b += 1
                     continue
-                if (r.get("enh_max") if r.get("enh_max") is not None
-                        else r.get("enh_ratio")) is None:
+            if self.require_qc:
+                if meta is None or (meta.get("enh_max") if meta.get("enh_max") is not None
+                                    else meta.get("enh_ratio")) is None:
                     no_qc += 1
                     continue
             if self.dce_root is not None:                  # raw: 4D series + timing
@@ -563,6 +571,12 @@ class UCSFDCEDataset(Dataset):
         log.info(f"[ucsf/{mode}] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE"
                  f"{extra}) under {self.main_root} | target_time={target_time}s "
                  f"dwi={dwi_bvalue or 'auto'} min_b={self.dwi_min_bvalue}")
+        if found == 0 and (low_b or no_qc):
+            raise RuntimeError(
+                f"every case was filtered out under {self.main_root}: {low_b} below "
+                f"b{self.dwi_min_bvalue}, {no_qc} without enhancement QC. A filter this "
+                f"aggressive is a configuration error -- check --dwi-min-bvalue against "
+                f"the b-values actually present (stage_meta.json 'dwi_src').")
 
     def __len__(self):
         return len(self.samples)
