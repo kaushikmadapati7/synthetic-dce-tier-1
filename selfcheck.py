@@ -196,6 +196,69 @@ def run_model_checks():
             assert torch.allclose(d.ddim_sample(shape, dev, steps=3, cond=cond, decode=False, seed=0),
                                   d.ddim_sample(shape, dev, steps=3, cond=cond, decode=False, seed=0))
 
+    @check("3D GAN completes a full train step (fwd+bwd) with both generators, 3 and 4 cond ch")
+    def _():
+        from .models import d_hinge_loss, g_total_loss
+        for gt in ("unet", "resnet"):
+            for pg, ch in ((False, 3), (True, 4)):
+                a = argparse.Namespace(z_dim=32, base_ch=8, n_upsamples=2,
+                                       spatial_size=(8, 32, 32), modality_dropout=False,
+                                       use_pregad=pg, seed=0, gan_generator=gt, adv_weight=1.0)
+                g = _build_gan(a, dev)
+                cond = torch.randn(2, ch, 8, 32, 32)
+                real = torch.randn(2, 1, 8, 32, 32).clamp(-1, 1)
+                fake = g.generate(cond)
+                assert fake.shape == real.shape, (gt, ch, fake.shape)
+                d_hinge_loss(g.discriminator(real, cond_vol=cond),
+                             g.discriminator(fake.detach(), cond_vol=cond)).backward()
+                g_total_loss(g.discriminator(g.generate(cond), cond_vol=cond),
+                             g.generate(cond), real, None, adv_weight=1.0)[0].backward()
+
+    @check("3D LDM flow: latent-grid ROI mask keeps rank, loss+backward works")
+    def _():
+        from .training.utils import downsample_cond
+        from .loss.loss import CustomLoss
+        from .models.autoencoder3d import AutoencoderKL3D
+        vae = AutoencoderKL3D(latent_channels=2, base_ch=8, ch_mults=(1, 2),
+                              num_res_blocks=1, attn_resolutions=())
+        vae.scaling_factor, vae.latent_shift = 1.0, 0.0
+        kw = dict(in_channels=2, out_channels=2, base_ch=8, ch_mults=(1, 2), cond_channels=3)
+        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=kw)
+        img = torch.randn(2, 1, 8, 32, 32).clamp(-1, 1)
+        cond = torch.randn(2, 3, 8, 32, 32)
+        mask = (torch.rand(2, 1, 8, 32, 32) > 0.8).float()
+        with torch.no_grad():
+            z0 = ldm.encode(img)
+        cond_ds = downsample_cond(cond, z0.shape[2:])
+        mask_ds = downsample_cond(mask, z0.shape[2:])
+        assert mask_ds.dim() == z0.dim() == 5, (mask_ds.shape, z0.shape)
+        ldm.loss(z0, cond=cond_ds, mask=mask_ds, roi_weight=10.0).backward()
+
+    @check("3D LDM flow: image-space anchor runs and gradients reach the UNet")
+    def _():
+        from .training.utils import downsample_cond
+        from .loss.loss import CustomLoss
+        from .models.autoencoder3d import AutoencoderKL3D
+        vae = AutoencoderKL3D(latent_channels=2, base_ch=8, ch_mults=(1, 2),
+                              num_res_blocks=1, attn_resolutions=())
+        vae.scaling_factor, vae.latent_shift = 1.0, 0.0
+        kw = dict(in_channels=2, out_channels=2, base_ch=8, ch_mults=(1, 2), cond_channels=3)
+        ldm = LDM_FlowMatching(autoencoder=vae, unet_kwargs=kw)
+        crit = CustomLoss(l1_weight=1., ssim_weight=1., perceptual_weight=0., roi_weight=10.)
+        img = torch.randn(2, 1, 8, 32, 32).clamp(-1, 1)
+        cond = torch.randn(2, 3, 8, 32, 32)
+        mask = (torch.rand(2, 1, 8, 32, 32) > 0.8).float()
+        with torch.no_grad():
+            z0 = ldm.encode(img)
+        torch.manual_seed(0)
+        loss = ldm.loss(z0, cond=downsample_cond(cond, z0.shape[2:]),
+                        mask=downsample_cond(mask, z0.shape[2:]), roi_weight=10.0,
+                        anchor_image=img, anchor_mask=mask, anchor_criterion=crit,
+                        anchor_weight=1.0, anchor_t_max=1.0)   # t_max=1 -> always anchors
+        loss.backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0
+                   for p in ldm.unet.parameters()), "no gradient reached the UNet"
+
     @check("cond channels follow --use-pregad (3 -> 4, doubled under modality dropout)")
     def _():
         from .training._ldm_base import _cond_channels
