@@ -216,7 +216,9 @@ def _build_data_ucsf(args, cfg, out):
 
     kw = dict(target_time=args.dce_target_time, dwi_bvalue=args.dwi_bvalue,
               test_frac=args.ucsf_test_frac, seed=args.seed,
-              use_pregad=getattr(args, 'use_pregad', False))
+              use_pregad=getattr(args, 'use_pregad', False),
+              dwi_min_bvalue=getattr(args, 'dwi_min_bvalue', 0),
+              require_qc=getattr(args, 'require_qc', False))
     dce_root = args.ucsf_dce_root or None          # None => staged (pre-extracted 3D DCE)
     train = build_ucsf_datasets(args.ucsf_main_root, dce_root, cfg, "train",
                                 harmonizer, **kw)
@@ -367,6 +369,14 @@ def parse_args():
                         "capacity: the model sees the baseline the gland enhances FROM, so it "
                         "predicts a residual instead of absolute intensity. Requires a staged "
                         "tree from a stage_ucsf.py run that wrote DCE_pre_to_T2W.")
+    p.add_argument("--dwi-min-bvalue", type=int, default=0,
+                   help="drop UCSF cases whose resolved DWI b-value is below this. "
+                        "UCSF spans b50..b1400 and ~13%% of cases only have b50, which "
+                        "carries almost no diffusion weighting -- mixing it with b1000 "
+                        "puts two different contrasts in one input channel. Try 600.")
+    p.add_argument("--require-qc", action="store_true", default=False,
+                   help="drop UCSF cases whose staged enhancement was never measured "
+                        "(empty mask or mask/DCE grid mismatch)")
     p.add_argument("--ucsf-test-frac", type=float, default=0.15,
                    help="fraction of UCSF patients held out as the test split (patient-level, by --seed)")
     # training

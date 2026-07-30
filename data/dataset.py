@@ -487,7 +487,8 @@ class UCSFDCEDataset(Dataset):
     def __init__(self, main_root, dce_root=None, cfg: PreprocessConfig | None = None,
                  harmonizer=None, subject_glob="*", target_time: float = 120.0,
                  t_max: float = 600.0, dwi_bvalue: str | None = None, pids=None,
-                 use_pregad: bool = False):
+                 use_pregad: bool = False, dwi_min_bvalue: int = 0,
+                 require_qc: bool = False):
         self.main_root = Path(main_root)
         self.dce_root = Path(dce_root) if dce_root else None      # None => staged mode
         self.cfg = cfg or PreprocessConfig()
@@ -499,10 +500,20 @@ class UCSFDCEDataset(Dataset):
         # that adds INFORMATION rather than capacity -- the model gets the baseline the
         # gland enhances FROM, so it predicts a residual instead of absolute intensity.
         self.use_pregad = use_pregad
+        # Cohort filters applied at LOAD time (no re-staging needed):
+        #  dwi_min_bvalue -- UCSF DWI b-values run b50..b1400. A b50 image carries
+        #    almost no diffusion weighting (it reads as anatomical/T2-like), so mixing
+        #    it with b1000 puts two different contrasts in the same input channel.
+        #    Set a floor (e.g. 600) to keep only genuine high-b diffusion.
+        #  require_qc -- drop cases whose staged enhancement was never measured
+        #    (mask empty or not matching the DCE grid), so every kept case has a
+        #    verified enhancing target and a usable ROI.
+        self.dwi_min_bvalue = int(dwi_min_bvalue or 0)
+        self.require_qc = require_qc
         self.input_keys = INPUT_KEYS + (PRE_KEY,) if use_pregad else INPUT_KEYS
         keep = set(pids) if pids is not None else None
         self.samples = []
-        found = skipped = no_dce = 0
+        found = skipped = no_dce = low_b = no_qc = 0
         for subj in sorted(self.main_root.glob(subject_glob)):
             if not subj.is_dir():
                 continue
@@ -516,6 +527,20 @@ class UCSFDCEDataset(Dataset):
             if not (t2 and adc and dwi and mask.exists()):
                 skipped += 1
                 continue
+            if self.dwi_min_bvalue and _dwi_bval(dwi) < self.dwi_min_bvalue:
+                low_b += 1
+                continue
+            if self.require_qc:
+                meta = subj / "stage_meta.json"
+                try:
+                    r = json.loads(meta.read_text())
+                except Exception:
+                    no_qc += 1
+                    continue
+                if (r.get("enh_max") if r.get("enh_max") is not None
+                        else r.get("enh_ratio")) is None:
+                    no_qc += 1
+                    continue
             if self.dce_root is not None:                  # raw: 4D series + timing
                 dce_dir = self.dce_root / pid / "DCE"
                 ok = (dce_dir / "DCE_4D_to_T2W.nii.gz").exists() and \
@@ -530,8 +555,14 @@ class UCSFDCEDataset(Dataset):
             self.samples.append((pid, subj, src))
             found += 1
         mode = "raw-4D" if self.dce_root is not None else "staged-3D"
-        log.info(f"[ucsf/{mode}] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE) "
-                 f"under {self.main_root} | target_time={target_time}s dwi={dwi_bvalue or 'auto'}")
+        extra = ""
+        if low_b:
+            extra += f", {low_b} below b{self.dwi_min_bvalue}"
+        if no_qc:
+            extra += f", {no_qc} without enhancement QC"
+        log.info(f"[ucsf/{mode}] {found} cases ({skipped} missing inputs, {no_dce} awaiting DCE"
+                 f"{extra}) under {self.main_root} | target_time={target_time}s "
+                 f"dwi={dwi_bvalue or 'auto'} min_b={self.dwi_min_bvalue}")
 
     def __len__(self):
         return len(self.samples)
@@ -631,7 +662,7 @@ def build_tier1_datasets(bao_root, cfg: PreprocessConfig | None = None, split="t
 def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None = None,
                         split="train", harmonizer=None, target_time=120.0,
                         dwi_bvalue=None, test_frac=0.15, seed=0, subject_glob="*",
-                        use_pregad=False):
+                        use_pregad=False, dwi_min_bvalue=0, require_qc=False):
     """UCSF single-center cohort with a deterministic patient-level train/test split.
 
     UCSF is one site, so there is no held-out *hospital*; instead a fixed fraction of
@@ -642,7 +673,8 @@ def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None =
     """
     full = UCSFDCEDataset(main_root, dce_root, cfg, harmonizer, subject_glob=subject_glob,
                           target_time=target_time, dwi_bvalue=dwi_bvalue,
-                          use_pregad=use_pregad)
+                          use_pregad=use_pregad, dwi_min_bvalue=dwi_min_bvalue,
+                          require_qc=require_qc)
     n = len(full)
     if n == 0:
         return _EmptyDataset()
