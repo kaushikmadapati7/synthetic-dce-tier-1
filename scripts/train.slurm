@@ -36,6 +36,9 @@ SEED=${SEED:-0}
 # ---- data / geometry ----------------------------------------------------------
 SPATIAL_SIZE=${SPATIAL_SIZE:-"32 192 192"}   # D H W
 REFERENCE=${REFERENCE:-dce}                   # t2w | dce | iso
+# REFERENCE=iso only. UCSF in-plane res spans 0.176-0.78mm over 256..1024 matrices, so a
+# fixed *pixel* crop covers 40-320mm of anatomy; iso makes --spatial-size a physical FOV.
+ISO_SPACING=${ISO_SPACING:-"0.35 0.35 3.0"}   # x y z mm -> 32x256x256 = 90x90x96mm
 DCE_PHASE=${DCE_PHASE:-early}                 # zhongyiyuan target: early | peak | <int>
 TEST_HOSPITALS=${TEST_HOSPITALS:-jiulong}     # held-out center(s), space-separated
 # ---- UCSF cohort (set UCSF_ROOT to switch off the Bao layout entirely) ---------
@@ -153,6 +156,7 @@ ARGS=(
   --seed "${SEED}"
   --spatial-size ${SPATIAL_SIZE}
   --reference "${REFERENCE}"
+  --iso-spacing ${ISO_SPACING}
   --t2w-norm "${T2W_NORM}"
   --dce-norm "${DCE_NORM}"
   --dce-robust-k "${DCE_ROBUST_K}"

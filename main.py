@@ -107,6 +107,7 @@ def make_criterion(args, device) -> CustomLoss:
 # ---------------------------------------------------------------------------
 def build_data(args):
     cfg = PreprocessConfig(reference=args.reference, spatial_size=tuple(args.spatial_size),
+                           iso_spacing=tuple(getattr(args, "iso_spacing", (1.0, 1.0, 1.0))),
                            tz_weight=args.tz_weight, pz_weight=args.pz_weight,
                            crop_to_prostate=getattr(args, "crop_to_prostate", False))
     out = Path(args.output_dir)
@@ -294,6 +295,13 @@ def parse_args():
     # data / geometry
     p.add_argument("--spatial-size", type=int, nargs=3, default=[32, 192, 192])
     p.add_argument("--reference", choices=["t2w", "dce", "iso"], default="dce")
+    # Only used when --reference iso. UCSF in-plane resolution spans 0.176-0.78 mm
+    # across 256/512/672/704/736/1024 matrices, so a fixed *pixel* crop covers
+    # anywhere from 40 mm to 320 mm of anatomy; resampling to a common grid first
+    # is what makes --spatial-size mean a fixed physical field of view.
+    p.add_argument("--iso-spacing", type=float, nargs=3, default=[0.35, 0.35, 3.0],
+                   metavar=("X", "Y", "Z"),
+                   help="target spacing in mm (x y z) for --reference iso")
     p.add_argument("--harmonize", action="store_true", default=True)
     p.add_argument("--no-harmonize", dest="harmonize", action="store_false")
     p.add_argument("--harmonize-max", type=int, default=200)
