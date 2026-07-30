@@ -33,6 +33,11 @@ from .eval import save_samples, _log_realism
 log = logging.getLogger("tier1")
 
 
+# a real prostate never fills more than ~1/3 of the cropped slice; above this the
+# mask is degenerate (all-ones) and makes a useless montage
+MONTAGE_MAX_MASK_FRAC = 0.35
+
+
 def _w5(t):                       # (B,C,H,W) -> (B,C,1,H,W) so 3D loss/metrics apply
     return t.unsqueeze(2) if t is not None else None
 
@@ -78,12 +83,17 @@ def evaluate2d(gen, loader, device, tag, compute_fid_flag=True):
                 p75r.append(rr); p75p.append(pp)
             if compute_fid_flag:
                 all_preds.append(pred[i].cpu()); all_targets.append(target[i].cpu())
-            # Montage slice = the LARGEST-gland slice in the whole split, not element 0
+            # Montage slice = the largest PLAUSIBLE gland in the split, not element 0
             # of the first batch. save_samples picks the most-prostate slice within a
             # volume, but a 2D "volume" is one slice, so that choice has to be made
             # here -- otherwise the montage lands on an apex/base sliver (one run drew
             # a 251-voxel gland) that shows nothing about prostate fidelity.
-            area = float(mask[i].sum())
+            # The plausibility cap matters: some cases carry a degenerate all-ones
+            # mask, and an uncapped "largest" selector finds precisely those (one run
+            # drew a mask covering 65532 of 65536 pixels). A prostate never fills more
+            # than roughly a third of the cropped frame.
+            frac = float(mask[i].mean())
+            area = float(mask[i].sum()) if frac <= MONTAGE_MAX_MASK_FRAC else -1.0
             if area > best_area:
                 best_area = area
                 first = (cond[i:i+1].cpu(), target[i:i+1].cpu(),
