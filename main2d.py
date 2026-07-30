@@ -65,6 +65,7 @@ def evaluate2d(gen, loader, device, tag, compute_fid_flag=True):
     if loader is None:
         return {}, None
     per, p75r, p75p, first = [], [], [], None
+    best_area = -1.0        # pick the montage slice by gland size, see below
     all_preds, all_targets = [], []          # each 2D slice (1,H,W) is one FID sample
     for b in loader:
         cond = b["cond"].to(device); target = b["target"].to(device); mask = b["mask"].to(device)
@@ -77,8 +78,16 @@ def evaluate2d(gen, loader, device, tag, compute_fid_flag=True):
                 p75r.append(rr); p75p.append(pp)
             if compute_fid_flag:
                 all_preds.append(pred[i].cpu()); all_targets.append(target[i].cpu())
-        if first is None:
-            first = (cond.cpu(), target.cpu(), pred.cpu(), mask.cpu(), b["id"][0])
+            # Montage slice = the LARGEST-gland slice in the whole split, not element 0
+            # of the first batch. save_samples picks the most-prostate slice within a
+            # volume, but a 2D "volume" is one slice, so that choice has to be made
+            # here -- otherwise the montage lands on an apex/base sliver (one run drew
+            # a 251-voxel gland) that shows nothing about prostate fidelity.
+            area = float(mask[i].sum())
+            if area > best_area:
+                best_area = area
+                first = (cond[i:i+1].cpu(), target[i:i+1].cpu(),
+                         pred[i:i+1].cpu(), mask[i:i+1].cpu(), b["id"][i])
     m = aggregate(per)
     pc = pearson(p75r, p75p)
     if pc is not None:
