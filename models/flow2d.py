@@ -37,6 +37,12 @@ class ResBlock2D(nn.Module):
         return h + self.skip(x)
 
 
+def _up2(ch):
+    """2x nearest upsample + 3x3 conv (checkerboard-free ConvTranspose2d replacement)."""
+    return nn.Sequential(nn.Upsample(scale_factor=2, mode="nearest"),
+                         nn.Conv2d(ch, ch, 3, 1, 1))
+
+
 class UNet2D(nn.Module):
     """3-scale conditional U-Net velocity predictor. Input HxW divisible by 8."""
 
@@ -50,9 +56,12 @@ class UNet2D(nn.Module):
         self.d2 = ResBlock2D(base, base * 2, emb); self.dn2 = nn.Conv2d(base * 2, base * 2, 4, 2, 1)
         self.d3 = ResBlock2D(base * 2, base * 4, emb); self.dn3 = nn.Conv2d(base * 4, base * 4, 4, 2, 1)
         self.mid = ResBlock2D(base * 4, base * 4, emb)
-        self.up3 = nn.ConvTranspose2d(base * 4, base * 4, 4, 2, 1); self.u3 = ResBlock2D(base * 8, base * 2, emb)
-        self.up2 = nn.ConvTranspose2d(base * 2, base * 2, 4, 2, 1); self.u2 = ResBlock2D(base * 4, base, emb)
-        self.up1 = nn.ConvTranspose2d(base, base, 4, 2, 1); self.u1 = ResBlock2D(base * 2, base, emb)
+        # upsample+conv rather than ConvTranspose2d -- see gan2d._up for the measured
+        # period-2 checkerboard this construction produced in the 3D decoder. Shape is
+        # unchanged (n -> 2n) and self.out is already a plain conv.
+        self.up3 = _up2(base * 4); self.u3 = ResBlock2D(base * 8, base * 2, emb)
+        self.up2 = _up2(base * 2); self.u2 = ResBlock2D(base * 4, base, emb)
+        self.up1 = _up2(base); self.u1 = ResBlock2D(base * 2, base, emb)
         self.out = nn.Sequential(nn.GroupNorm(min(8, base), base), nn.SiLU(), nn.Conv2d(base, in_ch, 3, 1, 1))
 
     def forward(self, x, t, cond):

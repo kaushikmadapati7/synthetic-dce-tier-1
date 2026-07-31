@@ -166,6 +166,29 @@ def run_model_checks():
                 with torch.no_grad():
                     assert g(torch.randn(1, ch, *ss)).shape == (1, 1, *ss)
 
+    @check("U-Net generator decoder uses no transposed convs (checkerboard guard)")
+    def _():
+        # runs/v2_3d_gan predictions carried a period-2 checkerboard: lag-1
+        # autocorrelation of the first difference was -0.60 (white noise is -0.50)
+        # against +0.81 for the real DCE target, with 5x the target's HF power.
+        # Cause was ConvTranspose3d in _up3 and in the final output layer. The
+        # decoder must upsample+conv instead (as common.Upsample3D already does).
+        from .models.gan2d import Generator2D
+        from .models.flow2d import UNet2D
+        tconv = (torch.nn.ConvTranspose2d, torch.nn.ConvTranspose3d)
+        nets = {"UNetGenerator3D": UNetGenerator3D(in_channels=3, base_ch=8,
+                                                   spatial_size=(8, 32, 32)),
+                "Generator2D": Generator2D(base=8),
+                "UNet2D": UNet2D(base=8)}
+        for label, net in nets.items():
+            bad = [n for n, m in net.named_modules() if isinstance(m, tconv)]
+            assert not bad, f"transposed convs reintroduced in {label}: {bad}"
+        # shapes must be unchanged by the swap
+        with torch.no_grad():
+            assert nets["Generator2D"](torch.randn(1, 3, 64, 64)).shape == (1, 1, 64, 64)
+            assert nets["UNet2D"](torch.randn(1, 1, 64, 64), torch.rand(1),
+                                  torch.randn(1, 3, 64, 64)).shape == (1, 1, 64, 64)
+
     @check("GAN eval is deterministic (repeat evals of one checkpoint agree)")
     def _():
         for gt in ("unet", "resnet"):

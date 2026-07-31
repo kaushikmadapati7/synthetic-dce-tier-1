@@ -24,7 +24,20 @@ def _down(ic, oc, norm=True):
 
 
 def _up(ic, oc, drop=False):
-    layers = [nn.ConvTranspose2d(ic, oc, 4, 2, 1), nn.InstanceNorm2d(oc)]
+    """Nearest upsample + 3x3 conv, NOT ConvTranspose2d (checkerboard).
+
+    The 3D counterpart of this decoder measurably stamped a period-2 pattern into
+    its output (runs/v2_3d_gan: lag-1 autocorrelation of the first difference
+    -0.60, vs +0.81 for real DCE and -0.50 for white noise). This 2D path uses the
+    identical ConvTranspose(4,2,1) construction, so it is fixed on the same
+    grounds; note it has NOT been measured directly here, because the saved 2D
+    volumes are restored to native resolution and that 2x interpolation would
+    smooth a pixel-scale artifact away before it could be detected.
+
+    Shape is unchanged: ConvTranspose2d(4,2,1) and upsample(2)+conv3(p=1) both n -> 2n.
+    """
+    layers = [nn.Upsample(scale_factor=2, mode="nearest"),
+              nn.Conv2d(ic, oc, 3, 1, 1), nn.InstanceNorm2d(oc)]
     if drop:
         layers.append(nn.Dropout(0.5))
     layers.append(nn.ReLU(True))
@@ -46,7 +59,9 @@ class Generator2D(nn.Module):
         self.u2 = _up(base * 16, base * 4, drop=True)
         self.u3 = _up(base * 8, base * 2)
         self.u4 = _up(base * 4, base)
-        self.out = nn.Sequential(nn.ConvTranspose2d(base * 2, out_ch, 4, 2, 1), nn.Tanh())
+        # output layer: nothing follows it to smooth a checkerboard, so it matters most
+        self.out = nn.Sequential(nn.Upsample(scale_factor=2, mode="nearest"),
+                                 nn.Conv2d(base * 2, out_ch, 3, 1, 1), nn.Tanh())
 
     def forward(self, x):
         d1 = self.d1(x); d2 = self.d2(d1); d3 = self.d3(d2); d4 = self.d4(d3); d5 = self.d5(d4)

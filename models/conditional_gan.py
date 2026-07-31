@@ -174,8 +174,21 @@ def _dn3(ic, oc, stride, norm=True):
 
 
 def _up3(ic, oc, stride, drop=False):
-    k = tuple(4 if s == 2 else 3 for s in stride)
-    layers = [nn.ConvTranspose3d(ic, oc, k, stride, 1, bias=False), _norm(oc)]
+    """Nearest upsample + 3x3x3 conv, NOT ConvTranspose3d.
+
+    Transposed convs stamp a period-2 checkerboard into the output. Measured on
+    runs/v2_3d_gan: lag-1 autocorrelation of the first difference was -0.60 in the
+    prediction (more sign-alternating than white noise, -0.50) against +0.81 for
+    the real DCE target, with 5x the target's high-frequency power. k=4/stride=2
+    gives uniform overlap in theory, but stacking these under an adversarial loss
+    reintroduces it anyway. common.Upsample3D (used by the VAE/UNet3D path) already
+    does it this way; the GAN decoder just wasn't.
+
+    Output shape is unchanged: ConvTranspose3d(k=4,s=2,p=1) and
+    ConvTranspose3d(k=3,s=1,p=1) both map n -> n*s, as does upsample(s) + conv3(p=1).
+    """
+    layers = [nn.Upsample(scale_factor=tuple(stride), mode="nearest"),
+              nn.Conv3d(ic, oc, 3, 1, 1, bias=False), _norm(oc)]
     if drop:
         layers.append(nn.Dropout3d(0.5))
     layers.append(nn.ReLU(True))
@@ -213,10 +226,12 @@ class UNetGenerator3D(nn.Module):
             first = i == n_levels - 1
             self.ups.append(_up3(chs[i] if first else chs[i] + chs[i], skip,
                                  self.strides[i], drop=(i >= n_levels - 2)))
+        # Final layer writes straight to the image, so it is the worst place for a
+        # transposed conv -- its checkerboard lands in the output with nothing after
+        # it to smooth it. Same upsample+conv treatment as _up3.
         self.out = nn.Sequential(
-            nn.ConvTranspose3d(chs[0] * 2, out_channels,
-                               tuple(4 if s == 2 else 3 for s in self.strides[0]),
-                               self.strides[0], 1),
+            nn.Upsample(scale_factor=tuple(self.strides[0]), mode="nearest"),
+            nn.Conv3d(chs[0] * 2, out_channels, 3, 1, 1),
             nn.Tanh())
 
     def forward(self, cond_vol):
