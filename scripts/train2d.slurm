@@ -5,7 +5,10 @@
 #SBATCH --qos=pod
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+# 2D holds the whole slice cache in RAM: ~52k train slices of (3+1+1,256,256) fp16
+# is ~34G, plus val/test caches (~10G) and torch/CUDA overhead. 64G OOM-killed the
+# first v3 attempt during slice-prep; leave headroom.
+#SBATCH --mem=96G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err

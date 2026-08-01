@@ -20,6 +20,26 @@ from torch.utils.data import Dataset
 log = logging.getLogger("tier1")
 
 
+def _stack_draining(chunks: list) -> torch.Tensor:
+    """torch.stack, but freeing each source slice as it is copied.
+
+    Plain torch.stack holds the whole input list AND the stacked result at once,
+    so peak RSS is ~2x the cache. At 3667 UCSF cases that is ~52k slices of
+    (3,256,256)+(1,256,256)+(1,256,256) fp16 = ~34 GB resident, peaking ~68 GB
+    during the three stacks -- which OOM-killed every 2D run at --mem=64G, right
+    at the end of slice-prep (jobs 1146108-1146111). Draining the list as we copy
+    keeps peak at ~1x plus one slice.
+
+    Consumes `chunks` (empty on return).
+    """
+    if not chunks:
+        return torch.empty(0)
+    out = torch.empty((len(chunks),) + tuple(chunks[0].shape), dtype=chunks[0].dtype)
+    for i in range(len(chunks) - 1, -1, -1):   # back-to-front so pop() is O(1)
+        out[i] = chunks.pop()
+    return out
+
+
 class SliceDCEDataset(Dataset):
     def __init__(self, dataset3d, depth: int, prostate_only: bool = True,
                  min_area: int = 50, log_every: int = 100):
@@ -37,10 +57,14 @@ class SliceDCEDataset(Dataset):
                 ids.append(f"{s['id']}_z{z:02d}")
             if log_every and (c + 1) % log_every == 0:
                 log.info(f"[slice-prep] {c + 1}/{n} cases -> {len(ids)} slices")
-        self.cond = torch.stack(conds) if conds else torch.empty(0)
-        self.target = torch.stack(targets) if targets else torch.empty(0)
-        self.mask = torch.stack(masks) if masks else torch.empty(0)
+        self.cond = _stack_draining(conds)
+        self.target = _stack_draining(targets)
+        self.mask = _stack_draining(masks)
         self.ids = ids
+        gb = sum(t.numel() * t.element_size()
+                 for t in (self.cond, self.target, self.mask)) / 1024 ** 3
+        log.info(f"[slice-prep] done: {len(ids)} slices resident, {gb:.1f} GB "
+                 f"({self.cond.dtype})")
 
     def __len__(self):
         return len(self.ids)
