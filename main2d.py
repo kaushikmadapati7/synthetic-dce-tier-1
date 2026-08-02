@@ -116,6 +116,10 @@ def main():
     set_seed(args.seed)
     out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
     setup_logging(out)
+    # Mirror main.py: without this the ONLY record of a 2D run is its .err log, so
+    # results cannot be re-verified or compared from artifacts after the fact.
+    cfg_name = "config_eval.json" if getattr(args, "eval_only", False) else "config.json"
+    (out / cfg_name).write_text(json.dumps(vars(args), indent=2, default=str))
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"device={device}  model=pix2pix-2D")
 
@@ -236,8 +240,13 @@ def main():
         model.load_state_dict(torch.load(ckpt_p, map_location=device))
     model.eval()
     fid_flag = getattr(args, "compute_fid", True)
-    evaluate2d(gen, test, device, "TEST", compute_fid_flag=fid_flag)
-    _, first = evaluate2d(gen, val, device, "VAL", compute_fid_flag=fid_flag)
+    test_m, _ = evaluate2d(gen, test, device, "TEST", compute_fid_flag=fid_flag)
+    val_m, first = evaluate2d(gen, val, device, "VAL", compute_fid_flag=fid_flag)
+    # both splits, tagged -- the 3D path writes test-only, but the 2D VAL/TEST gap is
+    # what tells us whether best-ckpt selection generalized
+    (out / "metrics.json").write_text(json.dumps(
+        {"test": test_m, "val": val_m, "checkpoint": ckpt_p.name if ckpt_p.exists() else None},
+        indent=2, default=str))
     if first is not None:
         cond, target, pred, mask, cid = first
         save_samples(out / "samples", _w5(cond), _w5(target), _w5(pred), _w5(mask),
