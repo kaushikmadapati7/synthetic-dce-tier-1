@@ -149,9 +149,13 @@ def main():
                 if dst.exists() and (dst.parent / "target_DCE.nii.gz").exists():  # resumable
                     skipped += 1
                     continue
-                # (3,D,H,W) -> (D,3,H,W): D slices as one batch through the 2D model
+                # (3,D,H,W) -> (D,3,H,W): D slices as one batch through the 2D model.
+                # no_grad is required, not just an optimization: the flow samplers
+                # disable grad internally but the GAN generator does not, so its
+                # output still carries requires_grad and .numpy() raises.
                 cslices = batch["cond"][i].permute(1, 0, 2, 3).to(device)
-                vol = gen(cslices)[:, 0].cpu().numpy()  # (D,H,W) on the cropped grid
+                with torch.no_grad():
+                    vol = gen(cslices)[:, 0].detach().cpu().numpy()   # (D,H,W), cropped grid
                 ref = _dce_ref(args.data_root, args.image_subdir, cid,
                               getattr(args, 'ucsf_main_root', ''))
                 if ref is None:
