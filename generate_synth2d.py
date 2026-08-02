@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from .main import parse_args, build_data, set_seed, setup_logging
 from .models.gan2d import Generator2D
 from .models.flow2d import FlowMatching2D, LatentFlowMatching2D
-from .data.preprocessing import uncrop_pad, load_sitk
+from .data.preprocessing import uncrop_pad, load_sitk, make_iso_reference
 from .data.dataset import _resolve_stem, MODALITY_STEMS
 from .data.slice_dataset import SliceDCEDataset
 from .main2d import _fit_scaling_2d
@@ -101,6 +101,31 @@ def _build_gen(args, train_loader, device):
 
 
 @torch.no_grad()
+def _to_native(vol: np.ndarray, args, ref: sitk.Image, pad_value: float = -1.0) -> sitk.Image:
+    """Put a prediction from the model grid back into native DCE geometry.
+
+    uncrop_pad is pure index arithmetic -- it undoes the center crop but does NOT
+    resample. That is correct only while the model grid and the native grid share
+    spacing, which holds for --reference dce and FAILS for --reference iso: a
+    1024^2 @ 0.176mm case is modelled on a 0.35mm iso grid, so a 256-voxel
+    prediction spans 90mm, and pasting it into the native array while stamping
+    native spacing would write it at half scale.
+
+    So: uncrop onto the grid the model actually used, attach THAT geometry, then
+    resample to the native DCE grid. For reference=dce the two grids coincide and
+    this reduces to the old path exactly.
+    """
+    iso = getattr(args, "reference", "dce") == "iso"
+    grid = make_iso_reference(ref, tuple(args.iso_spacing)) if iso else ref
+    full = uncrop_pad(vol, grid.GetSize()[::-1], pad_value=pad_value)   # (x,y,z)->(z,y,x)
+    img = sitk.GetImageFromArray(full.astype(np.float32))
+    img.CopyInformation(grid)
+    if not iso:
+        return img
+    return sitk.Resample(img, ref, sitk.Transform(), sitk.sitkLinear,
+                         pad_value, sitk.sitkFloat32)
+
+
 def main():
     args = parse_args()
     args.eval_only = True                              # load the saved harmonizer, no re-fit
@@ -131,18 +156,13 @@ def main():
                               getattr(args, 'ucsf_main_root', ''))
                 if ref is None:
                     log.warning(f"no DCE ref for {cid}; skipping"); continue
-                native = sitk.GetArrayFromImage(ref).shape
-                vol = uncrop_pad(vol, native, pad_value=-1.0)
-                img = sitk.GetImageFromArray(vol.astype(np.float32))
-                img.CopyInformation(ref)               # native DCE geometry
+                img = _to_native(vol, args, ref)        # native DCE geometry
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 sitk.WriteImage(img, str(dst))
                 # matched preprocessed target in the SAME [-1,1] space + geometry, so
                 # synth-vs-target intensities are directly comparable (the raw DCE on
                 # disk is in scanner units and is NOT apples-to-apples with the synth)
-                tvol = uncrop_pad(batch["target"][i, 0].cpu().numpy(), native, pad_value=-1.0)
-                timg = sitk.GetImageFromArray(tvol.astype(np.float32))
-                timg.CopyInformation(ref)
+                timg = _to_native(batch["target"][i, 0].cpu().numpy(), args, ref)
                 sitk.WriteImage(timg, str(dst.parent / "target_DCE.nii.gz"))
                 n += 1
                 if n % 20 == 0:
