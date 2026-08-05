@@ -279,6 +279,14 @@ def main():
         trainer = TRAINERS[args.model]
         _, gen = trainer(args, train_loader, val_loader, test_loader, criterion, device)
         log.info(f"training done in {(time.time() - t0) / 60:.1f} min")
+        # The trainers return the FINAL-epoch model, not the selected best checkpoint,
+        # so scoring `gen` directly reports a model that late-training degradation may
+        # have wrecked -- GANs here collapse late (d -> 0.02, adv -> 6.2), and on
+        # v3_3d_gan the final epoch scored roi_pearson 0.419 where the best checkpoint
+        # scored 0.482. main2d already reloads before its final eval; this matches it.
+        if getattr(args, "eval_ckpt", "best") != "last":
+            log.info("reloading best checkpoint for final evaluation")
+            _, gen = LOADERS[args.model](args, train_loader, test_loader, device)
 
     metrics = evaluate(args, gen, test_loader, device)
     save_indist_sample(args, gen, val_loader, device)   # in-distribution (val) montage
