@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader
 
 from .data import (PreprocessConfig, Harmonizer, HarmonizationConfig,
                    build_tier1_datasets, build_ucsf_datasets, CanonicalDCEDataset,
-                   NewbatchDCEDataset, UCSFDCEDataset,
+                   NewbatchDCEDataset, UCSFDCEDataset, ucsf_split_indices, RawSubset,
                    fit_harmonizer_from_dataset, CANONICAL_HOSPITALS, TIER1_TEST_HOSPITALS)
 from .loss import CustomLoss
 from .training import TRAINERS, LOADERS
@@ -200,9 +200,18 @@ def _build_data_ucsf(args, cfg, out):
             hcfg.dce_robust_k = args.dce_robust_k    # DCE target -> normalize alike
             harmonizer = Harmonizer(hcfg)
             if harmonizer.nyul_modalities:
-                fit_ds = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root or None, cfg,
-                                        target_time=args.dce_target_time,
-                                        dwi_bvalue=args.dwi_bvalue)
+                # TRAIN patients only. Fitting on the full cohort leaks held-out
+                # intensity statistics into the normalization that every split then
+                # depends on. The Bao path above already excludes its test hospitals;
+                # this had not. Indices come from the same helper the split uses, so
+                # the two cannot drift apart.
+                fit_full = UCSFDCEDataset(args.ucsf_main_root, args.ucsf_dce_root or None, cfg,
+                                          target_time=args.dce_target_time,
+                                          dwi_bvalue=args.dwi_bvalue,
+                                          dwi_min_bvalue=getattr(args, 'dwi_min_bvalue', 0),
+                                          require_qc=getattr(args, 'require_qc', False))
+                fit_ds = RawSubset(fit_full, ucsf_split_indices(
+                    len(fit_full), "train", args.ucsf_test_frac, args.seed))
                 if len(fit_ds):
                     log.info(f"fitting Nyul {harmonizer.nyul_modalities} on "
                              f"{min(len(fit_ds), args.harmonize_max)} UCSF cases ...")

@@ -692,14 +692,35 @@ def build_ucsf_datasets(main_root, dce_root=None, cfg: PreprocessConfig | None =
     n = len(full)
     if n == 0:
         return _EmptyDataset()
+    keep = ucsf_split_indices(n, split, test_frac, seed)
+    return torch.utils.data.Subset(full, keep) if keep else _EmptyDataset()
+
+
+def ucsf_split_indices(n: int, split: str, test_frac: float, seed: int) -> list[int]:
+    """Patient indices for a split. Factored out so the harmonizer fit can select the
+    SAME training patients -- fitting Nyul landmarks on the full cohort leaks test
+    intensity statistics into the normalization every split then depends on (the Bao
+    path has always excluded its test hospitals; the UCSF path did not)."""
     order = list(range(n))
     np.random.default_rng(seed).shuffle(order)
     n_test = max(1, int(round(test_frac * n)))
     test_idx = set(order[:n_test])
     if split == "train":
-        keep = [i for i in range(n) if i not in test_idx]
-    elif split == "test":
-        keep = [i for i in range(n) if i in test_idx]
-    else:
-        keep = list(range(n))
-    return torch.utils.data.Subset(full, keep) if keep else _EmptyDataset()
+        return [i for i in range(n) if i not in test_idx]
+    if split == "test":
+        return [i for i in range(n) if i in test_idx]
+    return list(range(n))
+
+
+class RawSubset:
+    """Index-restricted view exposing ``raw_modalities`` (torch Subset does not),
+    so a harmonizer can be fit on a split rather than the whole cohort."""
+
+    def __init__(self, ds, idx):
+        self.ds, self.idx = ds, list(idx)
+
+    def __len__(self):
+        return len(self.idx)
+
+    def raw_modalities(self, i):
+        return self.ds.raw_modalities(self.idx[i])

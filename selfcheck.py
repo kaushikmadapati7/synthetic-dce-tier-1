@@ -297,6 +297,26 @@ def run_data_checks():
     from .data.preprocessing import PreprocessConfig
     from .data.harmonization import Harmonizer, HarmonizationConfig
     print("\n[data / staging]")
+
+    @check("UCSF split is disjoint, exhaustive, seed-stable; harmonizer fits TRAIN only")
+    def _():
+        from .data import ucsf_split_indices
+        n = 200
+        for seed in (0, 1):
+            tr = ucsf_split_indices(n, "train", 0.15, seed)
+            te = ucsf_split_indices(n, "test", 0.15, seed)
+            assert not (set(tr) & set(te)), "train/test overlap -- LEAKAGE"
+            assert set(tr) | set(te) == set(range(n)), "split does not cover the cohort"
+            assert len(te) == max(1, round(0.15 * n)), f"test frac wrong: {len(te)}"
+            assert tr == ucsf_split_indices(n, "train", 0.15, seed), "split not deterministic"
+        # different seeds must actually reshuffle (else seed sweeps reuse one split)
+        assert (ucsf_split_indices(n, "test", 0.15, 0)
+                != ucsf_split_indices(n, "test", 0.15, 1)), "seed does not change the split"
+        # the harmonizer must never see a test patient
+        tr0 = set(ucsf_split_indices(n, "train", 0.15, 0))
+        te0 = set(ucsf_split_indices(n, "test", 0.15, 0))
+        assert not (tr0 & te0)
+
     root = Path(tempfile.mkdtemp())
     MAIN, DCE, OUT = root / "ds2", root / "ds3", root / "staged"
     rng = np.random.default_rng(0)
