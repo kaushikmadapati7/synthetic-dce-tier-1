@@ -1,6 +1,7 @@
 """Shared helpers for the per-model training loops."""
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -30,12 +31,20 @@ def save_ckpt(args, name, model, epoch, total_epochs, state_dict=False):
 
 
 @torch.no_grad()
-def val_score(gen, val_loader, device, metric="ssim_roi"):
+def val_score(gen, val_loader, device, metric="ssim_roi", epoch=None, output_dir=None):
     """Checkpoint-selection score of ``gen`` over the val set. ``metric`` picks what
     to maximize (see metrics.selection_score): 'ssim_roi' (legacy, smoothness-
     biased), 'roi_pearson' (faithfulness), 'realism' (label-free realism proxy), or
     'balanced' (realistic AND faithful -- the clinical-realism objective). Returns
-    -inf when there is no val set, so best-checkpoint tracking is a silent no-op."""
+    -inf when there is no val set, so best-checkpoint tracking is a silent no-op.
+
+    The FULL aggregate is logged and appended to ``val_trajectory.jsonl`` rather than
+    discarded. Faithfulness and realism move in OPPOSITE directions during training --
+    on v3_3d_gan the best checkpoint scored roi_pearson 0.482 / grad_ratio 0.711 while
+    the final epoch scored 0.419 / 0.906 -- so the single selection scalar hides which
+    end of that tradeoff a run is sitting at, and reconstructing it afterwards means
+    re-evaluating every saved checkpoint. The metrics are already computed here.
+    """
     if val_loader is None:
         return float("-inf")
     from ..metrics import eval_metrics, aggregate, selection_score
@@ -47,7 +56,23 @@ def val_score(gen, val_loader, device, metric="ssim_roi"):
         if pred.shape != target.shape:
             pred = F.interpolate(pred, size=target.shape[2:], mode="trilinear", align_corners=False)
         per.append(eval_metrics(pred, target, mask))
-    return selection_score(aggregate(per), metric)
+    agg = aggregate(per)
+    score = selection_score(agg, metric)
+
+    from ..metrics import realism_score
+    rs = realism_score(agg)
+    keys = ("roi_pearson", "ssim_roi", "mae_roi", "roi_var_ratio", "roi_grad_ratio",
+            "roi_w1", "p75_corr")
+    log.info("  val: " + "  ".join(f"{k}={agg[k]:.4f}" for k in keys if k in agg)
+             + (f"  realism={rs:.4f}" if rs is not None else ""))
+    if output_dir is not None:
+        row = {"epoch": epoch, "select_metric": metric, "select_score": score,
+               "realism_score": rs, **{k: float(v) for k, v in agg.items()}}
+        p = Path(output_dir) / "val_trajectory.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    return score
 
 
 def save_best(args, name, model, score, best):

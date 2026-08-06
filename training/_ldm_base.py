@@ -330,8 +330,9 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
         if val_loader is not None and is_ckpt_epoch(epoch, args.epochs, val_every):
             ldm.unet.eval()
             if ema: ema.apply_to(ldm.unet)        # score + save the EMA weights
-            best = save_best(args, name, ldm, val_score(gen, val_loader, device,
-                             getattr(args, "select_metric", "ssim_roi")), best)
+            best = save_best(args, name, ldm, val_score(
+                gen, val_loader, device, getattr(args, "select_metric", "ssim_roi"),
+                epoch=epoch + 1, output_dir=args.output_dir), best)
             if ema: ema.restore(ldm.unet)
             ldm.unet.train()
 
