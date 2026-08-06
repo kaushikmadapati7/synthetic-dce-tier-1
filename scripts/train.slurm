@@ -49,6 +49,7 @@ UCSF_DCE_ROOT=${UCSF_DCE_ROOT:-}              # raw DS3 tree (slow path; usually
 UCSF_TEST_FRAC=${UCSF_TEST_FRAC:-0.15}        # patient-level held-out fraction (single center)
 DCE_TARGET_TIME=${DCE_TARGET_TIME:-120}       # raw mode only (staged has it baked in)
 DWI_BVALUE=${DWI_BVALUE:-}                    # '' = highest available (b1000)
+USE_PREGAD=${USE_PREGAD:-0}                   # 1 = pre-contrast as a 4th cond channel
 HARMONIZE=${HARMONIZE:-1}                      # 1 = Nyul harmonization on, 0 = off
 HARMONIZE_MAX=${HARMONIZE_MAX:-200}
 T2W_NORM=${T2W_NORM:-nyul}                    # T2w INPUT norm: nyul | percentile (per-image, generalizes)
@@ -219,6 +220,7 @@ else
          --dce-phase "${DCE_PHASE}"
          --test-hospitals ${TEST_HOSPITALS})
 fi
+if [ "${USE_PREGAD}" = "1" ]; then ARGS+=(--use-pregad); fi
 if [ "${FIRST_STAGE}" = "medvae" ]; then ARGS+=(--medvae-model "${MEDVAE_MODEL}"); fi
 if [ "${HARMONIZE}" != "1" ]; then ARGS+=(--no-harmonize); fi
 if [ "${COMPUTE_FID}" != "1" ]; then ARGS+=(--no-fid); fi
@@ -230,6 +232,12 @@ if [ -n "${VAE_CKPT}" ]; then ARGS+=(--vae-ckpt "${VAE_CKPT}"); fi
 if [ -n "${EXTRA_ARGS}" ]; then ARGS+=(${EXTRA_ARGS}); fi
 
 # ---- run ----------------------------------------------------------------------
+# Resolved values for the toggles that are silent when mistyped or unsupported --
+# USE_PREGAD was absent from this script and an 8h run trained 3-channel while the
+# submitter believed it was 4-channel. Print them where they are easy to eyeball.
+echo "effective: reference=${REFERENCE} iso_spacing=(${ISO_SPACING}) spatial=(${SPATIAL_SIZE})" \
+     "pregad=${USE_PREGAD} first_stage=${FIRST_STAGE} dce_norm=${DCE_NORM}/k=${DCE_ROBUST_K}" \
+     "harmonize=${HARMONIZE} extra='${EXTRA_ARGS}'"
 srun python -m tier1_static.main "${ARGS[@]}"
 
 echo "done -> ${OUTPUT_DIR}"
