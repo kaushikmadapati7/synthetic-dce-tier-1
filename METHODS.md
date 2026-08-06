@@ -8,7 +8,7 @@ DCE volume in `[-1, 1]`.
 This file records (a) the UCSF cohort and how it is constructed, and (b) the pipeline
 defects found and corrected during the 2026-07 audit, with an explicit note on which
 corrections are reflected in the current results and which are still outstanding.
-Status as of **2026-07-30**.
+Status as of **2026-08-06**.
 
 ---
 
@@ -277,6 +277,36 @@ checkpoints rather than retrained.
 | M1 | ROI scalars pooled over the batch before reduction (`roi_radiomics`, `zone_metrics`, `eval_metrics`) | catastrophic inflation: on pure noise this reports **`roi_pearson` +0.977 where the truth is +0.020**, because cross-patient brightness differences masquerade as within-gland correlation | fixed — all ROI scalars computed per sample, then averaged |
 | M2 | 2D ROI mask rank mismatch | broadcast to a `(B, B, …)` outer product, silently mixing patients' masks | fixed; rank mismatches now raise |
 | M3 | `ssim3d` Gaussian window larger than the depth axis | wrong window on thin volumes; depth-1 now yields exact 2D SSIM | fixed (per-axis window, `min(dim, window)` forced odd) |
+| M4 | `main.py` scored the trainer's returned model, i.e. the **final epoch**, while `--eval-only` scored the selected best checkpoint | every 3D `metrics.json` was systematically pessimistic — `v3_3d_gan` test `roi_pearson` 0.419 (final) vs **0.482** (best). `main2d` had always reloaded correctly | fixed; `main.py` now honours `--eval-ckpt` and reloads before final eval |
+| M5 | `main2d` never wrote `config.json` or `metrics.json` | 2D results existed only inside SLURM `.err` logs — not re-verifiable, and lost on log rotation | fixed; both written, `metrics.json` carries val **and** test plus the checkpoint used |
+
+### 6.3b Defects found while producing artifacts
+
+| # | defect | effect | status |
+|---|---|---|---|
+| A1 | GAN decoder built from `ConvTranspose3d` (and the same in `gan2d`/`flow2d`) | period-2 **checkerboard** stamped into predictions: lag-1 autocorrelation of the first difference −0.60 (white noise is −0.50) against +0.81 for real DCE, 5× the target's HF power. Halved FID once removed (175 → 89) | fixed — upsample+conv everywhere; guarded in `selfcheck` |
+| A2 | `generate_synth2d` restored predictions with `uncrop_pad` + `CopyInformation` | pure index arithmetic with no resample: correct only when the model grid and native grid share spacing. Under `--reference iso` a 1024²@0.176 mm case would have been written at **half scale** | fixed — uncrop onto the model grid, then resample to native |
+| A3 | `generate_synth2d` ran without `no_grad` | GAN path crashed on `.numpy()`; flow paths survived only because their samplers disable grad internally | fixed |
+| A4 | `audit_baselines` had never been executed | `parse_args(argv)` (takes no argv) and `cond[i][0][m]` (rank mismatch) — the identity baseline, the script's whole purpose, could never have run | fixed; now also reports per-case `roi_pearson` for model vs t2w |
+| A5 | `train.slurm` had no `USE_PREGAD` knob (`train2d.slurm` did) | `USE_PREGAD=1` was silently ignored; an 8 h run trained 3-channel while believed to be 4-channel | fixed; the script now echoes an `effective:` line of the silent-failure-prone toggles |
+| A6 | `SliceDCEDataset` stacked via `torch.stack` | list and stacked tensor coexist, so peak RSS ≈ 2× the cache (~68 GB); OOM-killed all four 2D runs at the end of slice-prep | fixed (drain-while-copying, ~1×); `--mem` 64G → 96G |
+
+### 6.3c Leakage
+
+| # | defect | effect | status |
+|---|---|---|---|
+| L1 | `_build_data_ucsf` fit the Nyul harmonizer over the **entire cohort**, test patients included | held-out intensity statistics fed the landmark fit that every split's normalization depends on. The Bao path had always excluded its test hospitals; the UCSF path never did | fixed — fits TRAIN indices only, via a `ucsf_split_indices` helper shared with the splitter so they cannot drift |
+
+**L1 did not affect any run reported here**: all UCSF runs pass `--t2w-norm percentile
+--dce-norm robust`, leaving `nyul_modalities` empty so the fit is skipped entirely
+("harmonizer all per-image; no Nyul fit needed" in the logs). But `train.slurm`
+defaults `T2W_NORM=nyul`, so any run not overriding it would have leaked.
+
+A full audit of the remaining leakage surface came back clean: train/test disjoint and
+exhaustive; val carved from train only; `test_loader` passed into the trainers but
+never used; LDM `scaling_factor` computed from train latents and recomputed identically
+on load; 2D splits patients *before* slicing (no slice-level leakage); `evaluate` and
+`val_score` apply identical clamping and share metric code.
 
 M1 is the most important single finding in the audit: it is the reason earlier
 `roi_pearson` figures looked encouraging, and it invalidated the two conclusions
@@ -303,13 +333,74 @@ tree** — fixtures must be built from staged filenames, not idealized ones.
 
 ## 7. Validity of current results
 
-- The 2D GAN vs. 2D pixel-flow comparison was run after §6.1–6.3 were fixed, so it is
-  free of the pooling, masking, conditioning and seeding defects. VAL ≈ TEST for both.
-- **All current runs still train on the §1.7 FOV mixture.** They see an 8× range of
-  anatomical scale, and for the 17% of cases cropped below 80 mm the ROI metrics are
-  closer to whole-image metrics. The GAN-vs-flow *ranking* is still informative — both
-  models saw the same mixture — but the absolute numbers are not a clean baseline and
-  should not be quoted as one.
+### 7.1 Run-to-run variance — read this before quoting any comparison
+
+Two **config-identical runs at the same seed** (`v3_3d_gan` and the accidental
+replicate `v4_3d_gan_pregad`, whose `USE_PREGAD=1` was silently dropped, §A5) differ
+materially. `set_seed` seeds Python/NumPy/Torch but does **not** set
+`cudnn.deterministic`, `cudnn.benchmark=False`, or `use_deterministic_algorithms` — and
+3D conv backward uses non-deterministic `atomicAdd` regardless. Adversarial training
+then amplifies ~1e-7 divergences, and best-checkpoint selection turns a bumpy val
+trajectory into a noisy *discrete* choice of epoch, which moves every metric at once.
+
+| metric | v3 | replicate | Δ |
+|---|---|---|---|
+| roi_pearson | 0.4824 | 0.4657 | −0.017 |
+| ssim_roi | 0.3968 | 0.3887 | −0.008 |
+| mae_roi | 0.2355 | 0.2441 | +0.009 |
+| roi_var_ratio | 0.9123 | 0.8577 | −0.055 |
+| roi_grad_ratio | 0.7105 | 0.6763 | −0.034 |
+| **p75_corr** | **0.3570** | **0.0812** | **−0.276** |
+
+This is one replicate pair, so it bounds the noise magnitude but is not a standard
+deviation; ≥3 seeds are needed for that.
+
+**Why `p75_corr` is 16× worse than `roi_pearson`.** `roi_pearson` is a within-patient
+statistic averaged over 550 patients, so averaging suppresses variance. `p75_corr` is a
+single cross-patient correlation, and it measures the *amplitude* dimension — which the
+audit (§7.2) shows the model barely predicts at all. Nothing in an ROI-weighted L1 on a
+homogeneous target pins down a global offset, so amplitude drifts freely between runs.
+**Reproducibility tracks identifiability:** the well-determined component (structure)
+reproduces at ±0.017; the ill-determined one (amplitude) does not.
+
+**Consequences.** Differences below ~0.02 `roi_pearson` are unresolved at n=1. That
+retires one earlier claim: the 2D iso-vs-no-iso A/B differed by 0.020 on `roi_pearson`,
+i.e. within noise, so **iso cannot be said to improve metrics** — it remains justified
+on correctness grounds (§1.7) only. `p75_corr` should not be quoted from a single run.
+Comparisons that survive comfortably: GAN vs flow (0.113, ~7×), model vs t2w baseline
+(0.525, ~30×), PZ vs TZ (paired within run), best vs last checkpoint (0.063, ~4×).
+
+### 7.2 What the model has actually learned (audit, n=550 test)
+
+| predictor | MAE_roi | roi_r | knows |
+|---|---|---|---|
+| const (cohort ROI mean) | 0.2510 | — | nothing |
+| t2w copy | 0.3372 | **−0.043** | identity baseline |
+| **GAN** | 0.2355 | **+0.482** | trained generator |
+| level (oracle brightness) | **0.1851** | — | correct per-case brightness, no structure |
+
+**Structure is learned; amplitude is not.** Copying T2w scores ≈ 0, so `roi_pearson`
+0.482 is genuine localization, not anatomy passthrough. But the model tracks per-case
+brightness at only r = 0.334 and compresses between-case spread 2.4× (target sd 0.231 →
+0.098), and **51% of target ROI variance is between-case brightness** — so both models
+lose to the oracle-brightness baseline on MAE, and the flow is worse than a *constant*
+(−0.018) while still having real localization (r = 0.369).
+
+Physically coherent: per-case amplitude depends on injection dose/rate, cardiac output,
+bolus timing and scanner gain, almost none of which is visible in T2w/DWI/ADC. Within-
+gland structure is. Note PI-RADS curve types (I/II/III) are **scale-invariant**, so the
+failing component may be largely irrelevant to the Tier-2 clinical endpoint.
+
+### 7.3 Standing caveats
+
+- **All runs to date train on the §1.7 FOV mixture** — an 8× range of anatomical scale;
+  for the 17% cropped below 80 mm, ROI metrics approach whole-image metrics. The
+  GAN-vs-flow *ranking* holds (same mixture for both); absolute numbers are not a clean
+  baseline. Runs from `v3_*` onward use `--reference iso` and are exempt.
+- **3D `metrics.json` written before the M4 fix reports the final epoch, not the best
+  checkpoint.** Re-run with `--eval-only` to compare like with like.
+- 2D and 3D ROI metrics are **not** comparable: the 2D dataset keeps only
+  gland-containing slices, so the denominators differ.
 - Every result predating the audit is superseded.
 
 ## 8. Reproducing the current cohort
