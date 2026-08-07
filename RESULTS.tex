@@ -1,0 +1,364 @@
+% Synthetic DCE - methods & results brief (formulas)
+% Build:  pdflatex RESULTS.tex
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,microtype}
+\usepackage[table]{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\newcommand{\yhat}{\hat{y}}
+\newcommand{\roi}{\mathcal{M}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\Ex}{\mathbb{E}}
+\newcommand{\1}{\mathbb{1}}
+
+\title{Synthetic DCE from Non-Contrast Prostate MRI\\\large Methods and Results Brief}
+\author{Tier-1 static track --- UCSF cohort}
+\date{6 August 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+We predict a post-contrast DCE volume from three non-contrast sequences (T2w, DWI, ADC)
+on 3{,}667 UCSF prostate exams. A 3D conditional GAN reaches within-gland co-localization
+$r=0.482$, against $-0.043$ for the strongest trivial baseline (copying the T2w channel),
+so the model predicts enhancement structure rather than passing anatomy through.
+The substantive result is a decomposition: \textbf{within-gland structure is predictable;
+per-patient enhancement amplitude is not}, and amplitude accounts for $51\%$ of the signal.
+We show this is a property of the task rather than a tuning failure, and that the
+unidentifiable component is orthogonal to the PI-RADS curve-type endpoint, which is
+scale-invariant.
+\end{abstract}
+
+\section{Task}
+
+Let $x=(x^{\text{T2w}},x^{\text{DWI}},x^{\text{ADC}})\in\mathbb{R}^{3\times D\times H\times W}$
+be the stacked non-contrast input and $y\in[-1,1]^{1\times D\times H\times W}$ the target
+DCE phase. We learn $G_\theta:x\mapsto\yhat$ with $\yhat=\tanh(\cdot)\in[-1,1]$.
+$\roi_i\subset\Omega$ denotes the prostate mask of case $i$, $|\roi_i|\approx 5\%$ of the crop.
+
+\section{Data and target selection}
+
+\subsection{Cohort}
+
+\begin{center}
+\begin{tabular}{llr}
+\toprule
+Stage & Criterion & Remaining \\
+\midrule
+Patients with DCE & --- & 5{,}439 \\
+Successfully staged & inputs resolvable, mask matches DCE grid & 4{,}975 \\
+Enhancement QC (staging) & $\max_t \text{enh}(t) \ge 1.5$ & \textbf{4{,}246} \\
+DWI b-value filter & DWI resolves to $b\ge600$ & 3{,}684 \\
+Enhancement QC recorded & --- & \textbf{3{,}667} \\
+\midrule
+\multicolumn{2}{l}{Patient-level split} & 2805 / 312 / 550 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two cohort properties are findings rather than footnotes: $\approx12$--$13\%$ of patients
+never enhance at any timepoint (failed or mistimed injection), and $13\%$ of DWI resolves
+to $b{=}50$, which carries almost no diffusion weighting and therefore places a
+\emph{different contrast} in the same input channel as the $b{=}1000$ the majority receive.
+
+\subsection{Phase selection by elapsed time}
+
+Enhancement relative to pre-contrast is
+\begin{equation}
+\text{enh}(t)\;=\;\frac{\Ex_{v\in\roi}\,[\,S_v(t)\,]}{\Ex_{v\in\roi}\,[\,S_v(0)\,]},
+\end{equation}
+measured as: flat at $\approx 1.0$ to $t\approx45$\,s; wash-in $55$--$90$\,s
+($1.12\!\to\!2.00$); then a \textbf{plateau} of $2.1$--$2.5$ from $\approx 90$\,s past
+$300$\,s. There is no sharp peak, so $\arg\max_t \text{enh}(t)$ lands on plateau noise
+($\approx 280$\,s, into washout). Protocols are heterogeneous ($26$--$70$ phases,
+$1.7$--$13$\,s cadence), so a fixed \emph{index} is a different physiological moment per
+patient. We select by \emph{time},
+\begin{equation}
+j^\star \;=\; \arg\min_j \bigl| t_j - t_{\text{target}} \bigr|,
+\qquad t_{\text{target}} = 120\,\text{s},
+\end{equation}
+which sits inside the plateau, past the timing-sensitive wash-in, at $\approx92\%$ of maximum.
+
+\section{Preprocessing}
+
+\paragraph{Geometry.} All modalities are resampled to a common physical grid
+(\texttt{-{}-reference iso}) at spacing $(0.47,0.47,3.0)$\,mm, then center-cropped to
+$32\times192\times192$, i.e.\ a fixed field of view of $90\times90\times96$\,mm for
+\emph{every} patient. This matters: UCSF in-plane resolution spans $0.176$--$0.781$\,mm
+across $256$--$1024$ matrices, so a fixed \emph{pixel} crop of 256 covered anywhere from
+$40$\,mm to $320$\,mm of anatomy --- an $8\times$ range of scale, with 172 cases cropped
+below the width of a prostate.
+
+\paragraph{Intensity.} Per-image (single center, so no cross-scanner alignment).
+For DCE, with body-tissue median $m$ and robust spread $s$,
+\begin{equation}
+y \;\longmapsto\; \operatorname{clip}\!\Bigl(\frac{y-m}{k\,s},\,-1,\,1\Bigr),\qquad k=1 .
+\end{equation}
+$k=1$ was selected by measuring within-prostate target dispersion: $k{=}3\Rightarrow 0.073$,
+$k{=}2\Rightarrow0.109$, $k{=}1\Rightarrow\mathbf{0.218}$. Larger $k$ flattens the target
+until ROI metrics become noise on a near-uniform field.
+
+\section{Objective}
+
+With $\phi$ a frozen 3D MedicalNet feature extractor,
+\begin{equation}
+\mathcal{L} \;=\; \lambda_1\,\mathcal{L}_{1}^{\text{ROI}}
+\;+\;\lambda_s\bigl(1-\mathrm{SSIM}_{3D}(\yhat,y)\bigr)
+\;+\;\lambda_s\bigl(1-\mathrm{SSIM}_{\roi}(\yhat,y)\bigr)
+\;+\;\lambda_p\,\bigl\|\phi(\yhat)-\phi(y)\bigr\|_2^2 ,
+\end{equation}
+where the reconstruction term upweights the gland,
+\begin{equation}
+\mathcal{L}_{1}^{\text{ROI}}=\frac{\sum_{v\in\Omega} w_v\,\lvert \yhat_v-y_v\rvert}{\sum_{v\in\Omega} w_v},
+\qquad
+w_v = 1 + (\omega-1)\,\1[\,v\in\roi\,],\qquad \omega=10 .
+\end{equation}
+Without this the loss is dominated by background: the prostate is $\approx5\%$ of the crop.
+For the latent diffusion models the objective is latent-space MSE, so ROI emphasis reaches
+them only through the first-stage reconstruction.
+
+\subsection{Flow matching}
+
+On the straight-line (rectified) path with $t=0$ at the data and $t=1$ at the source,
+\begin{equation}
+z_t = \bigl(1-(1-\sigma_{\min})t\bigr)z_0 + t\,\epsilon,
+\qquad
+v^\star = \epsilon-(1-\sigma_{\min})z_0,
+\qquad \epsilon\sim\mathcal{N}(0,I),
+\end{equation}
+with $\sigma_{\min}=0$ by default and $t\sim\mathcal{U}(0,1)$ sampled per example, so the
+network learns the velocity field over the whole interpolation. The clean-latent identity
+\begin{equation}
+\hat z_0 \;=\; z_t - t\,v_\theta(z_t,t)
+\end{equation}
+holds exactly for any $\sigma_{\min}$ and is what the optional image-space anchor decodes
+and supervises.
+
+\section{Metrics}
+
+All ROI statistics are computed \textbf{per case and then averaged}, never pooled over the
+batch. Pooling mixes between-patient brightness into every statistic: on data where
+per-patient brightness is predicted perfectly but within-gland structure is pure noise,
+pooling reports $r=+0.977$ where the truth is $+0.020$.
+
+\paragraph{Localization (faithfulness).} For case $i$ with $\bar y=\Ex_{v\in\roi_i}[y_v]$,
+\begin{equation}
+r_i=\frac{\sum_{v\in\roi_i}(\yhat_v-\bar{\yhat})(y_v-\bar y)}
+{\sqrt{\sum_{v\in\roi_i}(\yhat_v-\bar{\yhat})^2}\;\sqrt{\sum_{v\in\roi_i}(y_v-\bar y)^2}},
+\qquad
+\texttt{roi\_pearson}=\frac{1}{N}\sum_{i=1}^{N} r_i .
+\end{equation}
+
+\paragraph{Texture and detail (realism).}
+\begin{align}
+\texttt{roi\_var\_ratio} &= \frac{1}{N}\sum_i \min\!\Bigl(\tfrac{\Var_{v\in\roi_i}[\yhat]}{\Var_{v\in\roi_i}[y]+\varepsilon},\,5\Bigr), \\[2pt]
+\texttt{roi\_grad\_ratio} &= \frac{1}{N}\sum_i \min\!\Bigl(\tfrac{\Ex_{v\in\roi_i}\lVert\nabla\yhat\rVert}{\Ex_{v\in\roi_i}\lVert\nabla y\rVert+\varepsilon},\,5\Bigr),
+\end{align}
+both with target value $1$: below $1$ is over-smoothed, above $1$ is over-textured.
+The intensity-histogram distance uses order statistics of the masked voxels,
+\begin{equation}
+\texttt{roi\_w1}=\frac{1}{2}\cdot\frac{1}{|\roi_i|}\sum_{k}\bigl|\yhat_{(k)}-y_{(k)}\bigr| ,
+\end{equation}
+the $\tfrac12$ mapping $[-1,1]\!\to\![0,1]$. These combine into a label-free proxy
+\begin{equation}
+\texttt{realism} = \operatorname{mean}\Bigl\{\,\nu(\texttt{var\_ratio}),\;\nu(\texttt{grad\_ratio}),\;1-\min(\texttt{w1},1)\,\Bigr\},
+\qquad \nu(x)=1-\min\bigl(|x-1|,1\bigr).
+\end{equation}
+
+\paragraph{Fidelity.} $\mathrm{PSNR}=10\log_{10}\!\bigl(L^2/\mathrm{MSE}\bigr)$ with $L=2$
+(the $[-1,1]$ range). Global SSIM/PSNR are $\approx99\%$ background and near-meaningless
+here; the \emph{gap} between global and ROI values is the diagnostic.
+
+\section{The central result: an identifiability decomposition}
+
+\subsection{Baselines}
+
+Three predictors that require no learning, with $\mu_i=\Ex_{v\in\roi_i}[y_v]$ and
+$\bar\mu=\Ex_i[\mu_i]$:
+\begin{equation}
+\yhat^{\text{const}}_v=\bar\mu ,
+\qquad
+\yhat^{\text{level}}_v=\mu_i ,
+\qquad
+\yhat^{\text{t2w}}_v = x^{\text{T2w}}_v .
+\end{equation}
+\texttt{const} knows nothing; \texttt{level} is an \emph{oracle} that knows the correct
+per-case brightness but has no internal structure; \texttt{t2w} is the identity baseline.
+
+\begin{center}
+\begin{tabular}{lccl}
+\toprule
+Predictor & $\mathrm{MAE}_{\roi}$ & \texttt{roi\_pearson} & Knows \\
+\midrule
+\texttt{const} & 0.2510 & --- & nothing \\
+\texttt{t2w copy} & 0.3372 & $\mathbf{-0.043}$ & identity baseline \\
+\textbf{MODEL (3D GAN)} & 0.2355 & $\mathbf{+0.482}$ & trained generator \\
+\texttt{level} (oracle) & \textbf{0.1851} & --- & correct brightness, no structure \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Variance decomposition}
+
+Total ROI variance splits into a between-case (amplitude) and a within-case (structure) term:
+\begin{equation}
+\Var_{i,v}[\,y\,] \;=\; \underbrace{\Var_i[\mu_i]}_{\text{between-case, amplitude}}
+\;+\; \underbrace{\Ex_i\bigl[\sigma_i^2\bigr]}_{\text{within-case, structure}},
+\qquad \sigma_i^2=\Var_{v\in\roi_i}[y_v].
+\end{equation}
+Measured on the test set: $\operatorname{sd}_i[\mu_i]=0.231$ and $\Ex_i[\sigma_i]=0.226$, so
+\begin{equation}
+\frac{\Var_i[\mu_i]}{\Var_i[\mu_i]+\Ex_i[\sigma_i^2]}
+=\frac{0.231^2}{0.231^2+0.226^2}
+=\mathbf{0.51}.
+\end{equation}
+
+\subsection{Reading it}
+
+\textbf{Structure is learned.} The T2w copy scores $\approx0$, so $r=0.482$ is genuine
+localization and not laundered anatomy.
+
+\textbf{Amplitude is not.} The model tracks per-patient brightness at only
+$\operatorname{corr}_i(\mu_i,\hat\mu_i)=0.334$ and compresses between-case spread
+$2.4\times$ ($0.231\to0.098$). Because amplitude is $51\%$ of the variance, both models lose
+to the oracle-brightness baseline in MAE, and the flow model is worse than a \emph{constant}
+predictor ($-0.018$) while still possessing real localization ($r=0.369$).
+
+\textbf{Why this is the task, not the model.} Per-case amplitude depends on gadolinium dose,
+injection rate, cardiac output, renal clearance and receiver gain --- none of which is
+visible in T2w/DWI/ADC. We checked the DICOM headers for these variables: they were removed
+by de-identification (dose, rate, patient weight, field strength absent; manufacturer
+overwritten with \texttt{"NA"}). The information is not merely unused; it is not present.
+
+\textbf{Why it may not matter.} PI-RADS curve types are scale-invariant: for any $\alpha>0$,
+\begin{equation}
+\text{type}\bigl(\alpha\,C(t)\bigr)=\text{type}\bigl(C(t)\bigr),
+\end{equation}
+since Type I (progressive), II (plateau) and III (washout) are defined by the \emph{shape}
+of $C(t)$ after the peak. The unidentifiable component is orthogonal to the clinical endpoint.
+
+\section{Results}
+
+3D models, best checkpoint, held-out test ($n=550$).
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Metric & 3D GAN & 3D flow (MedVAE) \\
+\midrule
+\texttt{roi\_pearson} $\uparrow$ & \textbf{0.482} & 0.369 \\
+\texttt{ssim\_roi} $\uparrow$ & \textbf{0.397} & 0.276 \\
+$\mathrm{MAE}_{\roi}$ $\downarrow$ & \textbf{0.236} & 0.269 \\
+\texttt{roi\_var\_ratio} $\to1$ & \textbf{0.912} & 1.711 \\
+\texttt{roi\_grad\_ratio} $\to1$ & 0.711 & \textbf{1.059} \\
+\texttt{realism} $\uparrow$ & \textbf{0.845} & 0.714 \\
+\texttt{roi\_pearson} PZ / TZ & 0.339 / 0.522 & 0.169 / 0.417 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+VAL $\approx$ TEST throughout. The GAN leads on faithfulness across four independent setups
+(2D and 3D, pixel and latent). The flow's single advantage is texture
+($\texttt{grad\_ratio}=1.06$ vs $0.71$): it is less smooth, which reads as more realistic
+while localizing worse --- the faithfulness/realism tradeoff in one row.
+
+\paragraph{Peripheral zone.} $r_{\text{PZ}}=0.339$ against $r_{\text{TZ}}=0.522$. PZ is
+where most clinically significant cancer arises and where DCE drives the PI-RADS upgrade
+rule, so this is the clinically weakest region and should be reported as such.
+
+\section{Reliability}
+
+\subsection{Checkerboard artifact (fixed)}
+
+Transposed convolutions in all three decoders stamped a period-2 pattern into predictions.
+Detector: the lag-1 autocorrelation of the first difference along a row,
+\begin{equation}
+\rho=\operatorname{corr}(d_k,\,d_{k+1}),\qquad d_k=y_{k+1}-y_k ,
+\end{equation}
+which tends to $-1$ under a pure checkerboard and to $-0.5$ for white noise.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+& $\rho$ & HF power fraction \\
+\midrule
+Real DCE target & $+0.813$ & 0.0003 \\
+GAN prediction (before) & $\mathbf{-0.598}$ & 0.0015 \\
+GAN prediction (after) & $+0.278$ & 0.0003 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The prediction alternated in sign at pixel scale \emph{more strongly than white noise}.
+Removing it halved FID ($175.5\to88.9$), an independent confirmation.
+
+\subsection{Run-to-run variance}
+
+Two configuration-identical runs at the same seed differ. Training is not deterministic
+(cuDNN autotuning; non-deterministic \texttt{atomicAdd} in 3D conv backward), adversarial
+dynamics amplify the divergence, and best-checkpoint selection converts a bumpy validation
+curve into a noisy discrete choice of epoch.
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Metric & $\Delta$ between identical runs \\
+\midrule
+\texttt{roi\_pearson} & 0.017 \\
+\texttt{roi\_var\_ratio} & 0.055 \\
+\texttt{p75\_corr} & \textbf{0.276} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Rule.} Differences below $\approx0.02$ in \texttt{roi\_pearson} are unresolved at
+$n=1$. \emph{Safe:} GAN $>$ flow ($0.113$, $\approx7\times$ noise); model $\gg$ t2w
+($\approx30\times$); PZ $<$ TZ (paired within run). \emph{Not safe:} anything from
+\texttt{p75\_corr} at $n=1$; the iso-vs-no-iso comparison ($0.020$, inside noise).
+
+\paragraph{Why \texttt{p75\_corr} is the unstable one.} \texttt{roi\_pearson} averages $N=550$
+per-case values, so variance is suppressed by $\sqrt{N}$. \texttt{p75\_corr} is a single
+cross-patient correlation, and it measures the \emph{amplitude} dimension --- precisely the
+component nothing in the loss constrains. \textbf{Reproducibility tracks identifiability}:
+the well-determined component reproduces, the ill-determined one drifts.
+
+\section{Tier-2: kinetics}
+
+The multi-timepoint target is the enhancement curve $C_t(\cdot)$ per voxel. Unlike generic
+video world models, the governing dynamics are \emph{known} --- the Tofts model,
+\begin{equation}
+\frac{dC_t}{dt} \;=\; K^{\text{trans}}\,C_p(t)\;-\;k_{ep}\,C_t(t),
+\qquad k_{ep}=\frac{K^{\text{trans}}}{v_e},
+\end{equation}
+with $C_p$ the arterial input function. A continuous-time latent world model
+(ODEWorld/PT-Flow) integrates a learned velocity field in \emph{physical} time,
+\begin{equation}
+\frac{dz_t}{dt}=v_\theta(z_t,t;z_0,c)
+\quad\Longrightarrow\quad
+z_T=z_0+\int_0^T v_\theta(z_t,t;z_0,c)\,dt ,
+\end{equation}
+where $z_0$ encodes the initial (pre-contrast) state and $c$ is a conditioning signal.
+Our contribution would be to \emph{constrain} $v_\theta$ to the Tofts family with parameter
+maps predicted from bpMRI, rather than learn it free-form --- a stronger inductive bias,
+guaranteed physically plausible curves, and a direct answer to the limitation that
+physics-informed ODE methods ``require explicit prior knowledge of the governing equations,''
+which for DCE we have.
+
+\paragraph{Goal state.} Acquisition duration (measured, $n=1367$): $p_5=222$\,s,
+$p_{50}=300$\,s, $p_{95}=380$\,s. Coverage is $99.0\%$ at $180$\,s, $\mathbf{91.9\%}$ at
+$240$\,s, and only $49.7\%$ at $300$\,s. We therefore anchor at $t=240$\,s: past plateau
+onset by $\approx150$\,s, inside the window where Types II and III separate, while retaining
+$92\%$ of the cohort.
+
+\section{Caveats}
+
+2D and 3D ROI metrics are not comparable (the 2D dataset keeps only gland-containing slices,
+so the denominators differ). FID was measured on the last checkpoint, not the best.
+Every result predating the 2026-07 audit is superseded. No claim is made that additional
+data would close the amplitude gap: an earlier conclusion to that effect was measured on a
+configuration with known defects and has been retracted.
+
+\end{document}

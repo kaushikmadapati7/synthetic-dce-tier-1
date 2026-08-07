@@ -1,18 +1,20 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.ipynb_checkpoints/
 
-# Run outputs / artifacts
-runs/
-logs/
+__pycache__/
+.DS_Store
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
 *.pt
 *.pth
-
+*.py[cod]
 # Environments
-venv/
-.venv/
-
 # OS / editor cruft
-.DS_Store
+# Python
+# Run outputs / artifacts
+logs/
+RESULTS.aux
+RESULTS.log
+RESULTS.out
+RESULTS.pdf
+runs/
+venv/
