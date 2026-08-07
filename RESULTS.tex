@@ -2,7 +2,7 @@
 % Build:  pdflatex RESULTS.tex
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb,booktabs,microtype}
+\usepackage{amsmath,amssymb,booktabs,microtype,pifont,textcomp}
 \usepackage[table]{xcolor}
 \usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
 
@@ -352,6 +352,199 @@ $p_{50}=300$\,s, $p_{95}=380$\,s. Coverage is $99.0\%$ at $180$\,s, $\mathbf{91.
 $240$\,s, and only $49.7\%$ at $300$\,s. We therefore anchor at $t=240$\,s: past plateau
 onset by $\approx150$\,s, inside the window where Types II and III separate, while retaining
 $92\%$ of the cohort.
+
+\section{Paper partitions and venue paths}
+
+The work separates into three claims with different evidence requirements, different
+readiness, and different venues. They are not sequential --- \textcircled{2} is nearly
+complete on existing data while \textcircled{1} waits on labels.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{p{0.9cm}p{4.4cm}p{4.6cm}p{3.5cm}}
+\toprule
+& \textbf{Claim} & \textbf{Still needs} & \textbf{Venue} \\
+\midrule
+\textcircled{1} &
+Single-phase synthetic DCE is clinically usable; multi-vendor, PI-RADS endpoint &
+Hanxue's labels; reader study; multi-seed repeats &
+Radiology / Lancet Dig.\ Health / Insights into Imaging \\
+\textcircled{2} &
+Standard synthesis metrics do not measure case-specific fidelity in ill-posed conditional
+generation &
+A within-model sweep; $\ge3$ seeds; a \emph{second domain} &
+ICLR 2027 (tight) $\to$ ICML / NeurIPS \\
+\textcircled{3} &
+A physics-constrained velocity field beats a free-form one for contrast kinetics &
+Multi-phase staging (done); Tofts parameterization; interpolation ablation &
+NeurIPS world-models workshop $\to$ MICCAI 2027 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textcircled{1} --- clinical.} The models exist and the pipeline is audited; the
+blocker is entirely the endpoint. The overall PI-RADS category is essentially absent from the
+report export ($92/10{,}538$ once a boilerplate footer URL is excluded), but the PI-RADS v2.1
+\emph{DCE component} is binary positive/negative and appears in $\approx6{,}400$ reports, of
+which $\approx2{,}374$ fall in our QC-passing cohort. That is the natural endpoint --- it is
+the one component synthetic DCE is responsible for, and $\kappa$ applies directly to a binary
+call. We are waiting on Hanxue's labels rather than mining the free text ourselves.
+
+\paragraph{\textcircled{2} --- identifiability and evaluation.} The strongest near-term
+result, and it is \emph{label-free}: the amplitude/structure decomposition (\S5), the finding
+that both models lose to an oracle-brightness baseline while retaining real localization, and
+the observation that \textbf{reproducibility tracks identifiability}. The framing must avoid
+the perception--distortion tradeoff (Blau \& Michaeli, CVPR 2018), which is established ---
+the contribution is a \emph{diagnostic for whether a conditional model used its conditioning
+at all}, together with evidence that the reported metrics cannot distinguish that case.
+A single medical domain will read as an application paper, so a second domain is the
+gating requirement, not a nicety.
+
+\paragraph{\textcircled{3} --- kinetics.} The novelty is not porting a world model to a new
+organ (that is a MICCAI paper, and the source method's authors would rightly be co-cited
+rather than superseded); it is that \emph{we know the governing equation}. ODEWorld's own
+related work identifies the requirement for ``explicit prior knowledge of the true governing
+equations'' as the limitation of physics-informed ODE methods --- for DCE that prior knowledge
+is the Tofts model. The experiment is therefore free-form $v_\theta$ versus Tofts-constrained
+$v_\theta$ versus Tofts-plus-residual, under irregular temporal sampling.
+
+\paragraph{Timing.} Approximate and worth confirming: ICLR 2027 closes around late September
+2026 ($\approx7$ weeks out), NeurIPS workshops around September--October, MICCAI 2027 around
+February 2027 ($\approx6$ months). Only \textcircled{2} is plausibly ICLR-ready in that
+window, and only if a second domain moves quickly; \textcircled{3} fits the workshop now and
+a full venue in the MICCAI cycle. A rushed ICLR rejection would also consume the MICCAI
+window, so the go/no-go should be taken on the pre-contrast conditioning result rather than
+on ambition.
+
+\paragraph{On the Tier-1 $\to$ Tier-2 gate.} The project's onboarding sets a hard gate:
+do not launch Tier 2 until PI-RADS $\kappa\ge0.6$. That gate is currently \emph{unmeasurable}
+rather than failed, since the overall category is absent from the data. Two developments
+argue for revisiting it: the scarcity rationale behind it has evaporated (UCSF supplies
+$\approx8\times$ the planned Tier-2 multi-phase pool at $\approx10\times$ the temporal
+density), and curve-type classification is scale-invariant, so the one component we cannot
+predict is orthogonal to the Tier-2 endpoint. A defensible revision is to gate on
+\emph{DCE-positivity} $\kappa$ instead of overall PI-RADS $\kappa$.
+
+\section{Anticipated technical questions}
+
+\paragraph{Q1. Is \texttt{roi\_pearson} $=0.482$ inflated by \emph{zonal} contrast rather
+than focal enhancement? A model that only learns ``TZ is brighter than PZ'' would score well
+without detecting anything.}
+This is the sharpest objection and the data partly answers it. If the whole-gland correlation
+were driven by the PZ/TZ contrast, we would expect it to greatly exceed the within-zone
+values, since the between-zone term would be doing the work. It does not:
+$r_{\text{gland}}=0.482$ sits \emph{between} $r_{\text{PZ}}=0.339$ and $r_{\text{TZ}}=0.522$,
+and both within-zone correlations are solidly positive. So there is genuine within-zone
+structure, not merely zonal architecture. What this does \emph{not} establish is
+lesion-level detection --- reproducing normal zonal anatomy correctly still scores well.
+That requires lesion labels and a lesion-level readout, which we do not yet have.
+
+\paragraph{Q2. You report a mean over 550 cases with no interval. What is the spread?}
+Not yet reported, and it should be. \texttt{roi\_pearson} is $\tfrac1N\sum_i r_i$; the
+per-case $r_i$ distribution and a bootstrap CI over cases are computed from data we already
+have. Until then, the run-to-run figure ($\pm0.017$) bounds \emph{run} variability but says
+nothing about \emph{case} variability, and the two should not be conflated.
+
+\paragraph{Q3. Why Pearson? The signal--concentration relationship is nonlinear.}
+Correct, and it is a real limitation. MR signal relates to gadolinium concentration through
+$T_1$ relaxation and the spoiled-gradient-echo signal equation, so a linear correlation
+measures the wrong thing if the nonlinearity is severe within the ROI dynamic range. Spearman
+$\rho$ would be the rank-based alternative and is trivial to add. We report Pearson because
+it is what the synthesis literature uses; reporting both would be more defensible.
+
+\paragraph{Q4. Does the $51\%$ decomposition assume independence between the two terms?}
+No. The law of total variance,
+$\Var[Y]=\Ex_i\!\bigl[\Var[Y\mid i]\bigr]+\Var_i\!\bigl[\Ex[Y\mid i]\bigr]$, is an identity;
+no independence is required. One precision caveat: we substituted
+$\bigl(\Ex_i[\sigma_i]\bigr)^2=0.226^2$ for $\Ex_i[\sigma_i^2]$. By Jensen
+$\Ex[\sigma^2]\ge(\Ex[\sigma])^2$, so the true within-case term is at least that large and
+\textbf{$51\%$ is an upper bound on the amplitude share}. The qualitative conclusion --- that
+amplitude is roughly half the signal --- is unaffected.
+
+\paragraph{Q5. Best checkpoints are selected on \texttt{ssim\_roi}, which is smoothness-biased.
+Is ``the GAN wins'' partly a selection artifact?}
+Partly, and this should be stated. \texttt{ssim\_roi} rewards smooth predictions, and the GAN
+is the smoother model ($\texttt{grad\_ratio}=0.71$ vs $1.06$). Selecting on
+\texttt{realism} or \texttt{balanced} would plausibly favour the flow. Two mitigations: the
+GAN also leads on \texttt{roi\_pearson}, which is not smoothness-biased, and the margin
+($0.113$) is $\approx7\times$ the run-to-run noise. But a selection-metric ablation
+(same runs, re-selected under each criterion) is the clean answer and has not been done.
+
+\paragraph{Q6. The LDM's ROI weighting only enters through the first stage. Is the diffusion
+objective effectively unweighted?}
+Yes, and it is a genuine asymmetry. The GAN's reconstruction term is ROI-weighted at
+$\omega=10$; the LDM trains on latent-space MSE with no clean mapping back to the mask, so
+ROI emphasis reaches it only via the frozen autoencoder's reconstruction. Combined with a
+MedVAE first stage never trained on prostate DCE, the flow is handicapped in ways not
+isolated from its objective. ``The GAN is better'' is therefore a statement about these two
+configurations, not about GANs versus flows in general.
+
+\paragraph{Q7. Were the 3D runs converged? 40 epochs versus 100 for 2D looks arbitrary.}
+It was a wall-clock choice ($\approx670$\,s/epoch $\times$ 40 $\approx$ 7.4\,h), not a
+convergence criterion, and convergence was not demonstrated. Against that: the GAN
+\emph{degrades} late (discriminator wins, $d\to0.03$, $\mathrm{adv}\to4.4$), and the selected
+best checkpoint clearly beats the final epoch ($0.482$ vs $0.419$), so longer training is not
+obviously the missing ingredient. The \texttt{val\_trajectory.jsonl} now logged per run will
+answer this directly.
+
+\paragraph{Q8. Are the $12$--$13\%$ ``non-enhancers'' biology, or registration failure?}
+Not yet separated, and it is a real confound. Enhancement QC is computed as a mask-mean ratio,
+so a mis-registered mask would depress it exactly like a failed injection. We now capture a
+per-case registration quality (\texttt{reg} in \texttt{dce\_times.json}, cohort median $0.459$,
+$p_{90}=1.694$) but have not yet correlated it against \texttt{enh\_max}. If the
+non-enhancers concentrate in the poor-registration tail, the ``failed injection'' interpretation
+is wrong and the exclusion criterion needs rethinking.
+
+\paragraph{Q9. FID on 550 grayscale MR volumes with an ImageNet Inception backbone --- is that
+meaningful?}
+Weakly. FID is biased at small sample sizes (KID is the low-$n$ alternative), and Inception
+features are natural-image features. A RadImageNet or medical-SSL backbone would be the
+defensible choice. We use FID because it is the field standard and because it responded
+sharply and correctly to a known artifact (the checkerboard: $175\to89$), which is evidence
+it is sensitive to \emph{something} real. It should not carry a headline claim.
+
+\paragraph{Q10. \texttt{realism\_score} is an unvalidated composite with equal weights.}
+Agreed --- it is a ranking heuristic for choosing between checkpoints without a reader
+session, not a validated metric, and no weighting study was done. It should not appear in a
+results table without that caveat; the components (\texttt{var\_ratio}, \texttt{grad\_ratio},
+\texttt{w1}) should be reported individually.
+
+\paragraph{Q11. \texttt{var\_ratio} and \texttt{grad\_ratio} are capped at 5. Doesn't that
+bias the mean?}
+Yes, by construction. The cap exists because a near-flat target ROI puts a small denominator
+in a ratio, and uncapped cases reached the thousands and destroyed the mean. The estimator is
+therefore biased toward 5 from above and should be reported with the median and the fraction
+of cases hitting the cap --- neither of which we currently log.
+
+\paragraph{Q12. Your target is normalized signal, not gadolinium concentration. How does that
+square with a Tofts-based Tier-2?}
+It does not, cleanly. Tofts governs $C_t(t)$, and converting signal to concentration requires
+a baseline $T_1$ map (e.g.\ variable flip angle) that this cohort does not include. The
+workable fallback is relative enhancement, which makes the recovered parameters
+\emph{semi-quantitative} --- defensible if stated plainly, not if presented as $K^{\text{trans}}$
+in physical units. An arterial input function is a second unresolved requirement, and the
+$90$\,mm crop may not contain a usable artery.
+
+\paragraph{Q13. Why not force determinism instead of measuring the noise?}
+\texttt{torch.use\_deterministic\_algorithms(True)} would raise on several 3D convolution
+kernels that have no deterministic implementation, and where it works it is substantially
+slower. More importantly it would suppress a real signal: the divergence is concentrated in
+the amplitude dimension precisely because nothing constrains it, so the instability is
+\emph{informative}. The right response is $\ge3$ seeds with mean $\pm$ sd, not determinism.
+
+\paragraph{Q14. A random $15\%$ patient split of a single center --- is the effective sample
+size really 550?}
+Probably smaller. Protocols cluster (\texttt{DCE PROSTATE}, Siemens TWIST, GE DISCO), and the
+split is not stratified by protocol, so test cases are not fully independent draws.
+Stratifying the split by \texttt{series} --- now captured in \texttt{stage\_meta.json} --- and
+reporting per-protocol metrics would be the fix, and would double as the multi-vendor
+generalization result the project promises.
+
+\paragraph{Q15. How were the prostate masks produced, and were they checked?}
+They are automatic segmentations delivered with the cohort (\texttt{pilot\_log.json} records
+the strategy and resulting volume per case); we have not manually verified any of them.
+Every ROI metric in this document is conditioned on those masks being right, so mask error
+propagates directly into the headline numbers.
 
 \section{Caveats}
 
