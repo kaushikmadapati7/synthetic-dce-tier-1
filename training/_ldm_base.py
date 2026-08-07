@@ -105,10 +105,10 @@ def _ldm_gen(ldm, args, lat_spatial, device, flow: bool):
     # the sampler's noise tensor must match the first stage's latent channels, NOT
     # args.latent_channels (they diverge for --first-stage wavelet: 8**levels)
     lat_ch = getattr(ldm.autoencoder, "latent_channels", args.latent_channels)
-    src_t2w = flow and getattr(args, "flow_source", "noise") == "t2w"
+    src_ch = flow_source_channel(args) if flow else None
     def gen(cond):
-        # image-to-image flow: start the ODE from the encoded T2w (cond channel 0)
-        source = ldm.encode(cond[:, 0:1]) if src_t2w else None
+        # image-to-image flow: start the ODE from an encoded conditioning channel
+        source = ldm.encode(cond[:, src_ch:src_ch + 1]) if src_ch is not None else None
         cond = prep_cond(cond, args, training=False)   # Layer-1: fixed --eval-modalities subset
         cond_ds = downsample_cond(cond, lat_spatial)
         shape = (cond.size(0), lat_ch, *lat_spatial)
@@ -222,6 +222,30 @@ def train_vae(args, train_loader, criterion, device):
     return vae
 
 
+def flow_source_channel(args):
+    """Conditioning-channel index to start the ODE from, or None to start from noise.
+
+    `pregad` makes the flow integrate PRE-CONTRAST -> POST-CONTRAST, which is the
+    physically meaningful path (contrast arriving) rather than noise -> image, and is
+    the two-timepoint case of the continuous-time formulation the Tier-2 track targets.
+    Caveat worth stating: the rectified path is a STRAIGHT LINE between endpoints, i.e.
+    constant velocity, whereas real enhancement is flat -> wash-in -> plateau. With two
+    observed timepoints that mis-specification is unobservable; it becomes the thing
+    multi-phase supervision (and a Tofts-constrained velocity) would fix.
+    """
+    src = getattr(args, "flow_source", "noise")
+    if src == "noise":
+        return None
+    if src == "t2w":
+        return 0
+    if src == "pregad":
+        if not getattr(args, "use_pregad", False):
+            raise ValueError("--flow-source pregad requires --use-pregad "
+                             "(pre-contrast is conditioning channel 3)")
+        return 3
+    raise ValueError(f"unknown --flow-source {src!r}")
+
+
 def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, flow: bool):
     vae = build_first_stage(args, train_loader, criterion, device)
     lat_ch = getattr(vae, "latent_channels", args.latent_channels)
@@ -281,7 +305,7 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
     for epoch in range(args.epochs):
         ldm.unet.train(); t0 = time.time(); agg = {}
         adv_on = flow_adv and epoch >= getattr(args, "flow_adv_warmup", 10)
-        src_t2w = flow and getattr(args, "flow_source", "noise") == "t2w"
+        src_ch = flow_source_channel(args) if flow else None
         for batch in train_loader:
             cond_raw = batch["cond"].to(device)
             cond = prep_cond(cond_raw, args, training=True)       # Layer-1 dropout
@@ -289,8 +313,8 @@ def train_ldm(args, train_loader, val_loader, test_loader, criterion, device, fl
             target_img = batch["target"].to(device)
             with torch.no_grad():
                 z0 = ldm.encode(target_img)
-                # image-to-image flow: source endpoint = encoded T2w (cond channel 0)
-                source = ldm.encode(cond_raw[:, 0:1]) if src_t2w else None
+                # image-to-image flow: source endpoint = an encoded conditioning channel
+                source = ldm.encode(cond_raw[:, src_ch:src_ch + 1]) if src_ch is not None else None
             zone_weight = batch["zone_weight"].to(device) if "zone_weight" in batch else None
             cond_ds = downsample_cond(cond, z0.shape[2:])
             mask_ds = downsample_cond(mask, z0.shape[2:])          # prostate mask -> latent grid

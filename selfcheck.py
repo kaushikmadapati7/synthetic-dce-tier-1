@@ -203,6 +203,23 @@ def run_model_checks():
             with torch.no_grad():
                 assert f.sample(x, steps=2, seed=0).shape == (1, 1, 64, 64)
 
+    @check("--flow-source pregad selects channel 3 and refuses without --use-pregad")
+    def _():
+        import argparse as _a
+        from .training._ldm_base import flow_source_channel
+        assert flow_source_channel(_a.Namespace(flow_source="noise")) is None
+        assert flow_source_channel(_a.Namespace(flow_source="t2w")) == 0
+        assert flow_source_channel(_a.Namespace(flow_source="pregad", use_pregad=True)) == 3
+        # starting the ODE from a channel that is not in the tensor would silently
+        # slice out of range, so this must raise rather than degrade
+        for bad in (_a.Namespace(flow_source="pregad", use_pregad=False),
+                    _a.Namespace(flow_source="nonsense")):
+            try:
+                flow_source_channel(bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"no error for {bad}")
+
     @check("split seed is separable from the training seed")
     def _():
         from .data import ucsf_split_indices
