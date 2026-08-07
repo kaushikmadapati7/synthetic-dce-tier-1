@@ -88,17 +88,25 @@ def _interleave_factor(dce_dir):
         return 1
 
 
+def anchor_name(t: float) -> str:
+    """Filename for the anchor phase nearest `t` seconds post-injection."""
+    return f"DCE_t{int(round(t)):03d}_to_T2W.nii.gz"
+
+
 def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue,
-              min_enh=0.0, overwrite=False):
+              min_enh=0.0, overwrite=False, anchor_times=()):
     """Stage a single patient. Returns a dict record (or {'pid', 'skip': reason})."""
     subj = Path(main_root) / pid
     dst = Path(out_root) / pid
     meta_p = dst / "stage_meta.json"
-    # "Already staged" means every artifact this version writes is present -- including
-    # the pre-contrast phase. Checking only stage_meta.json would make a cohort staged
-    # by an older version look complete, so backfilling a newly-added output would need
-    # a full --overwrite pass (and any interruption would restart it from scratch).
-    if meta_p.exists() and (dst / "DCE_pre_to_T2W.nii.gz").exists() and not overwrite:
+    # "Already staged" means every artifact THIS INVOCATION would write is present --
+    # including the pre-contrast phase and every requested anchor. Checking only
+    # stage_meta.json (or a fixed file list) would make a cohort staged by an older
+    # version look complete, so a re-stage adding new anchors would silently skip the
+    # entire cohort and report success. Same failure class as the --overwrite pass that
+    # once resurrected 729 pruned cases: the resume predicate must track the outputs.
+    want = [dst / "DCE_pre_to_T2W.nii.gz"] + [dst / anchor_name(t) for t in anchor_times]
+    if meta_p.exists() and all(p.exists() for p in want) and not overwrite:
         return {**json.loads(meta_p.read_text()), "cached": True}
 
     dce_dir = Path(dce_root) / pid / "DCE"
@@ -187,6 +195,28 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
                             enh = float(curve[js.index(j)])
         except Exception:
             pass
+    # Anchor phases for the multi-timepoint (Tier-2) track, on a COMMON time grid so
+    # heterogeneous protocols (26-70 phases, 1.7-13s cadence) become comparable.
+    # Extracted here because the 4D is already open -- one read, N phases.
+    #
+    # Only written when the timestamps are trustworthy: if we had to fall back to the
+    # enhancement curve (select_mode == "curve"), the times are corrupt, so a
+    # "time grid" built from them would be fiction. Those cases get anchors=None and
+    # the time-series loader can skip them.
+    anchors = None
+    if anchor_times and select_mode == "time":
+        off = idx % interleave if interleave > 1 else 0
+        anchors = {}
+        for a in anchor_times:
+            try:
+                j, t_a = ucsf_phase_index(dce_dir, a, t_max)
+            except Exception:
+                continue
+            if interleave > 1:                 # stay inside the SELECTED sub-series,
+                j = j - (j % interleave) + off  # else anchors alternate water/fat
+            j = max(0, min(int(j), n_phases - 1))
+            anchors[anchor_name(a)] = {"target_s": a, "idx": j, "rel_time_s": t_a,
+                                       "phase": extract_phase_from_4d(img4d, j)}
     del img4d
     if enh_max is None:
         enh_max = enh
@@ -201,6 +231,8 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     dst.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(phase, str(dst / "DCE_to_T2W.nii.gz"), True)     # True = compress
     sitk.WriteImage(pre_phase, str(dst / "DCE_pre_to_T2W.nii.gz"), True)
+    for fname, a in (anchors or {}).items():
+        sitk.WriteImage(a.pop("phase"), str(dst / fname), True)
     for src, name in ((t2, "T2W.nii.gz"), (adc, "ADC_to_T2W.nii.gz"),
                       (dwi, "DWI_to_T2W.nii.gz")):
         shutil.copyfile(src, dst / name)
@@ -209,10 +241,23 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
         if p.exists():
             shutil.copyfile(p, dst / name)
 
+    # `series` is the only scanner covariate that survived de-identification (the DICOM
+    # Manufacturer tag is wiped to "NA"): TWIST -> Siemens, DISCO -> GE (Dixon, and the
+    # likely source of the interleaved k=2 cases). `reg` is the DCE->T2w registration
+    # quality, which both CEKWorld and ODEWorld name as the failure mode for generated
+    # dynamics. Both were being discarded.
+    times_j = {}
+    try:
+        times_j = json.loads((dce_dir / "dce_times.json").read_text())
+    except Exception:
+        pass
     rec = {"pid": pid, "phase_idx": idx, "rel_time_s": t_sel, "n_phases": n_phases,
            "target_time": target_time, "enh_ratio": enh, "enh_max": enh_max,
            "enh_max_idx": enh_max_idx, "interleave": interleave, "sub_series": sub,
-           "select_mode": select_mode, "pre_idx": pre_idx, "dwi_src": Path(dwi).name}
+           "select_mode": select_mode, "pre_idx": pre_idx, "dwi_src": Path(dwi).name,
+           "series": times_j.get("series"), "reg": times_j.get("reg"),
+           "anchors": {k: {kk: vv for kk, vv in v.items() if kk != "phase"}
+                       for k, v in (anchors or {}).items()} or None}
     meta_p.write_text(json.dumps(rec, indent=1))
     return rec
 
@@ -233,6 +278,14 @@ def main(argv=None):
     p.add_argument("--target-time", type=float, default=120.0,
                    help="acquisition time (s) of the DCE phase to extract; default 120 "
                         "(stable plateau, past wash-in, before washout)")
+    p.add_argument("--anchor-times", type=float, nargs="*", default=[],
+                   help="extra phases to stage on a COMMON time grid (s post-injection) "
+                        "for the multi-timepoint track, e.g. --anchor-times 45 60 75 90 "
+                        "150 180 240. 0s and 120s already ship as DCE_pre_to_T2W and "
+                        "DCE_to_T2W. Sampling should be dense through wash-in (55-90s) "
+                        "and sparse across the plateau, since that is where PI-RADS "
+                        "curve types separate. Only written when timestamps are "
+                        "trustworthy (select_mode == 'time').")
     p.add_argument("--t-max", type=float, default=600.0)
     p.add_argument("--dwi-bvalue", default="", help="preferred DWI b-value (e.g. 1000); '' = highest")
     p.add_argument("--min-enh", type=float, default=0.0,
@@ -269,11 +322,13 @@ def main(argv=None):
         pids = pids[a.shard::a.num_shards]
     out.mkdir(parents=True, exist_ok=True)
     shard_note = f", shard {a.shard}/{a.num_shards} of {n_all}" if a.num_shards > 1 else ""
+    if a.anchor_times:
+        print(f"  anchors: {sorted(a.anchor_times)}  (+{len(a.anchor_times)} phases/case)")
     print(f"staging {len(pids)} patients -> {out}  (target_time={a.target_time}s, "
           f"workers={a.workers}{shard_note})", flush=True)
 
     jobs = [(pid, a.main_root, a.dce_root, a.out, a.target_time, a.t_max,
-             a.dwi_bvalue, a.min_enh, a.overwrite) for pid in pids]
+             a.dwi_bvalue, a.min_enh, a.overwrite, tuple(a.anchor_times)) for pid in pids]
     recs, t0 = [], time.time()
 
     def _tick(k):

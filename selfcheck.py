@@ -345,6 +345,7 @@ def run_data_checks():
     case("DEAD", times, flat=True)
     case("BADTIME", [0.0] + [None] * 11)
     case("ODDBVAL", times, bval="b0400")          # b-value outside the old hardcoded list
+    case("ANCHOR", times)                         # multi-timepoint anchor backfill
     common = dict(main_root=str(MAIN), dce_root=str(DCE), out_root=str(OUT),
                   target_time=72.0, t_max=600.0, dwi_bvalue="1000")
 
@@ -368,6 +369,26 @@ def run_data_checks():
     def _():
         r = stage_one("BADTIME", **common, min_enh=0.0)
         assert r["select_mode"] == "curve" and r["enh_ratio"] > 2.0, r
+
+    @check("anchors: written on a common time grid, and resume does NOT skip a backfill")
+    def _():
+        from .data.stage_ucsf import anchor_name
+        ANCH = (45.0, 90.0, 240.0)
+        r0 = stage_one("ANCHOR", **common, min_enh=0.0)          # stage WITHOUT anchors
+        assert not r0.get("cached") and r0.get("anchors") is None, r0
+        # the danger: an existing dir + stage_meta.json makes resume report "cached"
+        # and write nothing, so the backfill silently no-ops across the whole cohort
+        r1 = stage_one("ANCHOR", **common, min_enh=0.0, anchor_times=ANCH)
+        assert not r1.get("cached"), "resume skipped a backfill of new anchors"
+        for t in ANCH:
+            assert (OUT / "ANCHOR" / anchor_name(t)).exists(), f"missing anchor {t}s"
+        assert set(r1["anchors"]) == {anchor_name(t) for t in ANCH}, r1["anchors"]
+        # ...but a genuine re-run with the SAME anchors must still short-circuit
+        r2 = stage_one("ANCHOR", **common, min_enh=0.0, anchor_times=ANCH)
+        assert r2.get("cached"), "resume failed to skip an already-complete case"
+        # corrupt timestamps -> no fabricated time grid
+        rb = stage_one("BADTIME", **common, min_enh=0.0, anchor_times=ANCH, overwrite=True)
+        assert rb["select_mode"] == "curve" and rb["anchors"] is None, rb
 
     @check("--min-enh drops never-enhancing studies and removes any stale staged dir")
     def _():
