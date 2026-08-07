@@ -12,9 +12,10 @@ __pycache__/
 # Python
 # Run outputs / artifacts
 logs/
-RESULTS.aux
-RESULTS.log
-RESULTS.out
-RESULTS.pdf
 runs/
 venv/
+
+# LaTeX build artifacts (PDFs ARE tracked -- they are the deliverable)
+*.aux
+*.toc
+*.synctex.gz
