@@ -131,6 +131,9 @@ def main():
     log.info(f"2D slices/epoch: train {len(train.dataset)}  "
              f"val {len(val.dataset) if val else 0}  test {len(test.dataset) if test else 0}")
 
+    # 4th channel = pre-contrast. The 2D models were hardcoded to 3, so --use-pregad
+    # handed them a 4-channel tensor and the first conv raised. Matches training/gan.py.
+    cond_ch = 4 if getattr(args, "use_pregad", False) else 3
     criterion = make_criterion(args, device)
     is_flow = args.model != "gan"
     is_latent = is_flow and getattr(args, "first_stage", "vae") == "medvae"
@@ -154,21 +157,21 @@ def main():
         fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_2d"),
                               modality=getattr(args, "medvae_modality", "mri")).to(device)
         _fit_scaling_2d(fs, train, device)
-        model = LatentFlowMatching2D(fs, cond_ch=3, base=args.base_ch).to(device)
+        model = LatentFlowMatching2D(fs, cond_ch=cond_ch, base=args.base_ch).to(device)
         opt = torch.optim.Adam(model.unet.parameters(), lr=args.lr)
         gen = lambda c: model.sample(c, steps=args.sample_steps, seed=args.seed).clamp(-1, 1)
         log.info(f"2D MedVAE-latent flow: {fs.model_name} latent_ch={fs.latent_channels}, "
                  f"UNet {sum(p.numel() for p in model.unet.parameters())/1e6:.1f}M "
                  f"(anchor_weight={getattr(args, 'anchor_weight', 0.0)})")
     elif is_flow:                                 # pixel-space 2D CFM
-        model = FlowMatching2D(cond_ch=3, base=args.base_ch,
+        model = FlowMatching2D(cond_ch=cond_ch, base=args.base_ch,
                                source=getattr(args, "flow_source", "noise")).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
         gen = lambda c: model.sample(c, steps=args.sample_steps, seed=args.seed).clamp(-1, 1)
         log.info(f"2D flow: {sum(p.numel() for p in model.parameters())/1e6:.1f}M source={model.source}")
     else:                                         # pix2pix 2D GAN
-        model = Generator2D(in_ch=3, out_ch=1, base=args.base_ch).to(device)
-        disc = PatchDiscriminator2D(in_ch=1, cond_ch=3, base=args.base_ch).to(device)
+        model = Generator2D(in_ch=cond_ch, out_ch=1, base=args.base_ch).to(device)
+        disc = PatchDiscriminator2D(in_ch=1, cond_ch=cond_ch, base=args.base_ch).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.5, 0.999))
         opt_d = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
         gen = lambda c: model(c)

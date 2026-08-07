@@ -189,6 +189,30 @@ def run_model_checks():
             assert nets["UNet2D"](torch.randn(1, 1, 64, 64), torch.rand(1),
                                   torch.randn(1, 3, 64, 64)).shape == (1, 1, 64, 64)
 
+    @check("2D models accept 4 cond channels under --use-pregad")
+    def _():
+        from .models.gan2d import Generator2D, PatchDiscriminator2D
+        from .models.flow2d import FlowMatching2D
+        # these were hardcoded to cond_ch=3, so --use-pregad crashed the 2D path
+        for ch in (3, 4):
+            x = torch.randn(1, ch, 64, 64)
+            assert Generator2D(in_ch=ch, out_ch=1, base=8)(x).shape == (1, 1, 64, 64)
+            d = PatchDiscriminator2D(in_ch=1, cond_ch=ch, base=8)
+            assert d(torch.randn(1, 1, 64, 64), x).shape[0] == 1
+            f = FlowMatching2D(cond_ch=ch, base=8)
+            with torch.no_grad():
+                assert f.sample(x, steps=2, seed=0).shape == (1, 1, 64, 64)
+
+    @check("split seed is separable from the training seed")
+    def _():
+        from .data import ucsf_split_indices
+        # sweeping --seed for repeats must NOT reshuffle the cohort, else training
+        # variance and split variance are confounded
+        a = ucsf_split_indices(200, "test", 0.15, 7)
+        b = ucsf_split_indices(200, "test", 0.15, 7)
+        assert a == b, "same split seed must give the same split"
+        assert a != ucsf_split_indices(200, "test", 0.15, 8)
+
     @check("GAN eval is deterministic (repeat evals of one checkpoint agree)")
     def _():
         for gt in ("unet", "resnet"):

@@ -162,7 +162,7 @@ def build_data(args):
         n_val = max(1, int(round(len(train) * args.val_frac)))
         n_train = len(train) - n_val
         if n_train >= 1 and n_val >= 1:
-            g = torch.Generator().manual_seed(args.seed)
+            g = torch.Generator().manual_seed(split_seed)   # NOT args.seed -- see --split-seed
             train, val = torch.utils.data.random_split(train, [n_train, n_val], generator=g)
 
     # newbatch = extra TRAINING data only (data-scale lever); never in val/test, so
@@ -187,6 +187,8 @@ def build_data(args):
 
 def _build_data_ucsf(args, cfg, out):
     """UCSF single-center path for build_data: two fac mounts, patient-level split."""
+    split_seed = getattr(args, "split_seed", None)
+    split_seed = args.seed if split_seed is None else split_seed
     harmonizer = None
     if args.harmonize:
         saved = out / "harmonizer.json"
@@ -211,7 +213,7 @@ def _build_data_ucsf(args, cfg, out):
                                           dwi_min_bvalue=getattr(args, 'dwi_min_bvalue', 0),
                                           require_qc=getattr(args, 'require_qc', False))
                 fit_ds = RawSubset(fit_full, ucsf_split_indices(
-                    len(fit_full), "train", args.ucsf_test_frac, args.seed))
+                    len(fit_full), "train", args.ucsf_test_frac, split_seed))
                 if len(fit_ds):
                     log.info(f"fitting Nyul {harmonizer.nyul_modalities} on "
                              f"{min(len(fit_ds), args.harmonize_max)} UCSF cases ...")
@@ -225,7 +227,7 @@ def _build_data_ucsf(args, cfg, out):
                 harmonizer.save(saved)
 
     kw = dict(target_time=args.dce_target_time, dwi_bvalue=args.dwi_bvalue,
-              test_frac=args.ucsf_test_frac, seed=args.seed,
+              test_frac=args.ucsf_test_frac, seed=split_seed,
               use_pregad=getattr(args, 'use_pregad', False),
               dwi_min_bvalue=getattr(args, 'dwi_min_bvalue', 0),
               require_qc=getattr(args, 'require_qc', False))
@@ -246,7 +248,7 @@ def _build_data_ucsf(args, cfg, out):
         n_val = max(1, int(round(len(train) * args.val_frac)))
         n_train = len(train) - n_val
         if n_train >= 1 and n_val >= 1:
-            g = torch.Generator().manual_seed(args.seed)
+            g = torch.Generator().manual_seed(split_seed)   # NOT args.seed -- see --split-seed
             train, val = torch.utils.data.random_split(train, [n_train, n_val], generator=g)
     log.info(f"[ucsf] train cases: {len(train)}  val cases: {len(val) if val else 0}  "
              f"test cases: {len(test)}")
@@ -425,6 +427,11 @@ def parse_args():
                    help="epochs between val-score checkpoint selections; 0 = use --ckpt-every. "
                         "Set small (e.g. 2) for the GAN, whose ROI fidelity peaks early")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--split-seed", type=int, default=None,
+                   help="seed for the train/val/test SPLIT only; defaults to --seed. Set it "
+                        "(and hold it fixed) when sweeping --seed for repeats, otherwise each "
+                        "repeat reshuffles the cohort and you measure split variance plus "
+                        "training variance instead of training variance alone.")
     p.add_argument("--device", default="")
     p.add_argument("--limit", type=int, default=0, help="cap #cases (smoke testing)")
     # model size
