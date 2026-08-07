@@ -99,14 +99,23 @@ def main(argv=None):
             # cond[i] is (3,D,H,W) and m is (1,D,H,W): index channel 0 as a SLICE so
             # the ranks match. cond[i][0][m] is (D,H,W) indexed by a 4-d mask -> IndexError.
             t2w = cond[i][0:1][m].float()
+            # Pre-contrast copy. MANDATORY whenever --use-pregad is on: pre-contrast is
+            # the same acquisition at the same gain, so post ~ pre + enhancement, and a
+            # model handed it can drive MAE down by copying. t2w-copy scoring ~0 says
+            # nothing about that. If the model does not clearly beat THIS, the apparent
+            # gain from pregad is passthrough, not prediction.
+            pre = cond[i][3:4][m].float() if cond.shape[1] > 3 else None
             roi_vals.append(t.cpu().numpy().astype(np.float16))
             rp_m, rp_t = _roi_pearson(p, t), _roi_pearson(t2w, t)
+            rp_g = _roi_pearson(pre, t) if pre is not None else None
             rows.append({
                 "t_mean": t_mean, "t_std": t_std,
                 "p_mean": float(p.mean()), "p_std": float(p.std()),
                 "mae_model": float((p - t).abs().mean()),
                 "mae_level": float((t - t_mean).abs().mean()),     # oracle brightness
                 "mae_t2w": float((t2w - t).abs().mean()),
+                "mae_pre": float((pre - t).abs().mean()) if pre is not None else float("nan"),
+                "rp_pre": rp_g if rp_g is not None else float("nan"),
                 # the headline question: does the model localize better than copying T2w?
                 "rp_model": rp_m if rp_m is not None else 0.0,
                 "rp_t2w": rp_t if rp_t is not None else 0.0,
@@ -126,11 +135,18 @@ def main(argv=None):
     print("-" * 72)
     print(f"{'const':10s} {mae_const:9.4f}        --      nothing (one number for every case)")
     print(f"{'t2w copy':10s} {A['mae_t2w'].mean():9.4f}   {A['rp_t2w'].mean():+7.3f}   identity baseline")
+    if not np.isnan(A['mae_pre']).all():
+        print(f"{'PRE copy':10s} {np.nanmean(A['mae_pre']):9.4f}   {np.nanmean(A['rp_pre']):+7.3f}"
+              f"   <-- pre-contrast passthrough (the one to beat)")
     print(f"{'MODEL':10s} {A['mae_model'].mean():9.4f}   {A['rp_model'].mean():+7.3f}   <-- trained generator")
     print(f"{'level':10s} {A['mae_level'].mean():9.4f}        --      ORACLE brightness, no structure")
     print()
     print(f"localization headroom over the identity baseline: "
           f"{A['rp_model'].mean() - A['rp_t2w'].mean():+.3f} roi_pearson")
+    if not np.isnan(A['rp_pre']).all():
+        print(f"   ...over PRE-CONTRAST passthrough:                 "
+              f"{A['rp_model'].mean() - np.nanmean(A['rp_pre']):+.3f} roi_pearson   "
+              f"(MAE {np.nanmean(A['mae_pre']) - A['mae_model'].mean():+.4f})")
     print()
     print(f"target ROI: mean {A['t_mean'].mean():+.3f} (between-case sd {A['t_mean'].std():.3f})"
           f"   within-case sd {A['t_std'].mean():.3f}")
@@ -160,6 +176,8 @@ def main(argv=None):
          "mae_level_oracle": float(A["mae_level"].mean()),
          "roi_pearson_model": float(A["rp_model"].mean()),
          "roi_pearson_t2w_baseline": float(A["rp_t2w"].mean()),
+         "mae_pre_baseline": float(np.nanmean(A["mae_pre"])),
+         "roi_pearson_pre_baseline": float(np.nanmean(A["rp_pre"])),
          "brightness_pearson": r, "bias_mean": float(bias.mean()),
          "bias_sd": float(bias.std()),
          "target_between_case_sd": float(A["t_mean"].std()),
