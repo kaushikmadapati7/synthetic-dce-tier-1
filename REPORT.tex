@@ -31,10 +31,13 @@ GFR-contraindicated patients and by cross-protocol harmonization. A 3D condition
 attains within-gland co-localization $r=0.482$ against $-0.043$ for the strongest trivial
 baseline, establishing that the model predicts enhancement structure rather than passing
 anatomy through. The central result is a decomposition: within-gland \emph{structure} is
-predictable, per-patient enhancement \emph{amplitude} is not, and amplitude carries $51\%$
-of the signal. Supplying the pre-contrast phase as a fourth input channel improves every
-metric substantially --- \flag{pending a passthrough control that is not yet run}. Methods
-and the measurements that justify them are presented together throughout.
+predictable, per-patient enhancement \emph{amplitude} is not --- and amplitude carries
+$51\%$ of the signal. That deficit is then largely repaired by supplying the pre-contrast
+phase as a fourth input channel, which requires no gadolinium: brightness tracking rises from
+$r=0.334$ to $0.76$ and the model clears a pre-contrast passthrough control by $+0.267$
+\texttt{roi\_pearson}. Amplitude is therefore unidentifiable from bpMRI alone rather than
+unidentifiable in principle. Methods and the measurements that justify them are presented
+together throughout.
 \end{abstract}
 
 \tableofcontents
@@ -327,6 +330,9 @@ removed by de-identification (dose, rate, patient weight and field strength abse
 manufacturer overwritten with \texttt{"NA"}; only patient age survives). The information is
 not merely unused --- it is absent.
 
+\flag{Revised below.} \S6.3 shows this deficit is largely repaired once the pre-contrast
+phase is available: the claim holds for bpMRI alone, not in general.
+
 \paragraph{Why it may not matter clinically.} PI-RADS curve types are scale-invariant:
 $\text{type}(\alpha C(t))=\text{type}(C(t))$ for any $\alpha>0$, since Type I (progressive),
 II (plateau) and III (washout) are defined by post-peak \emph{shape}. The unidentifiable
@@ -351,21 +357,64 @@ Global SSIM / PSNR & 0.469 / 16.8 & 0.697 / 21.1 & $+49\%$ / $+4.3$\,dB \\
 \end{tabular}
 \end{center}
 
-\flag{This result is not yet interpretable, and should not be presented as settled.}
-Pre-contrast is a far stronger predictor of post-contrast than T2w is --- same acquisition,
-same receiver gain, and post $\approx$ pre $+$ enhancement. A model handed that channel can
-depress MAE by largely copying it, and a $43\%$ global MAE drop is precisely what copying
-would produce. The \texttt{t2w copy} baseline established that the 3-channel model was not
-laundering its input; there is no equivalent control for the fourth channel yet. Further,
-$\texttt{p75\_corr}$ is the noisiest metric available ($\Delta=0.276$ between
-\emph{identical} runs, \S\ref{sec:variance}), so a $+0.386$ change is only $\approx1.4\times$
-noise and cannot carry the claim alone.
+\paragraph{Passthrough control.} Pre-contrast is a far stronger predictor of post-contrast
+than T2w --- same acquisition, same receiver gain, post $\approx$ pre $+$ enhancement --- so
+a model handed that channel could depress MAE simply by copying it. Adding
+$\yhat_v=x^{\text{pre}}_v$ to the baseline panel settles it:
 
-The decisive comparison is a \textbf{pre-contrast passthrough baseline}
-($\yhat_v=x^{\text{pre}}_v$) plus the two stable amplitude readouts --- brightness tracking
-and between-case predicted spread, both averaged over 550 cases. One encouraging signal
-survives the objection: passthrough would lift PZ and TZ roughly together, whereas PZ gained
-$31\%$ against TZ's $5\%$.
+\begin{center}
+\begin{tabular}{lccl}
+\toprule
+Predictor & $\mathrm{MAE}_{\roi}$ & \texttt{roi\_pearson} & Knows \\
+\midrule
+\texttt{const} & 0.2510 & --- & nothing \\
+\texttt{t2w copy} & 0.3372 & $-0.043$ & identity baseline \\
+\texttt{PRE copy} & 0.2855 & $+0.260$ & pre-contrast passthrough \\
+\textbf{MODEL} & \textbf{0.2005} & $\mathbf{+0.527}$ & trained generator \\
+\texttt{level} (oracle) & 0.1851 & --- & brightness only, no structure \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The model clears passthrough by $+0.267$ \texttt{roi\_pearson} ($\approx16\times$ the noise
+floor) and $-0.085$ MAE. It is not copying: pre-contrast is used as a calibration reference
+\emph{and} structure is added on top.
+
+\paragraph{Amplitude is substantially recoverable --- a correction.}
+\S\ref{sec:decomp} argued that per-case amplitude is unidentifiable. That was too strong: it
+is unidentifiable \emph{from bpMRI alone}. Every stable amplitude readout moves sharply once
+pre-contrast is available.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+& Base GAN & $+$ pre-contrast & Target \\
+\midrule
+brightness tracking $\operatorname{corr}_i(\mu_i,\hat\mu_i)$ & 0.334 & \textbf{0.76} & 1.0 \\
+between-case predicted sd & 0.098 & \textbf{0.189} & 0.231 \\
+bias sd & 0.218 & \textbf{0.151} & --- \\
+gap to oracle brightness (MAE) & $+0.0505$ & \textbf{$+0.0154$} & $\le0$ \\
+improvement over \texttt{const} (MAE) & $+0.0154$ & \textbf{$+0.0504$} & $>0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Spread compression falls from $2.4\times$ to $1.22\times$, and the model closes from $27\%$
+worse than the oracle-brightness baseline to $8\%$ worse.
+
+\paragraph{The two-component split survives; the sizes were wrong.} Amplitude decomposes
+into an \emph{acquisition/baseline} term (receiver gain, the tissue baseline the gland
+enhances from) and an \emph{injection/physiology} term (dose, rate, cardiac output, renal
+clearance). Pre-contrast --- same series, same gain --- supplies the first, and it turns out
+to dominate. The residual ($r=0.76$ rather than $1.0$; spread still $18\%$ compressed; MAE
+still short of the oracle) is plausibly the second, which de-identification removed from the
+headers and which no image contains. Clinically this costs nothing: a pre-contrast $T_1$
+requires no gadolinium, so the premise of the work is intact.
+
+\flag{Remaining caveat.} These are single runs. The large movements (passthrough margin,
+brightness tracking, spread) are many multiples of the noise floor; the
+$+0.045$ \texttt{roi\_pearson} gain over the base GAN is only $\approx2.6\times$ and would
+benefit from seed repeats.
 
 \section{Reliability}
 
@@ -491,7 +540,10 @@ no protocol confound.
 \end{center}
 
 Track 2 is the strongest near-term result and is \emph{label-free}: the decomposition of
-\S\ref{sec:decomp} plus the reproducibility-tracks-identifiability observation. Its framing
+\S\ref{sec:decomp}, the reproducibility-tracks-identifiability observation, and now a
+constructive counterpart --- the missing component is recovered by naming the right input,
+which turns ``here is something that cannot be predicted'' into ``here is which input carries
+which component of the target,'' a stronger and more useful claim. Its framing
 must avoid the perception--distortion tradeoff, which is established; the contribution is a
 \emph{diagnostic for whether a conditional model used its conditioning at all}. A single
 medical domain reads as an application paper, so a second domain is the gating requirement.
