@@ -78,7 +78,10 @@ VAE_ADV_WARMUP=${VAE_ADV_WARMUP:-5}            # epochs of pure recon before adv
 ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # flow trajectory-anchoring (FlowMI-style image-space recon); 0=off, try 0.5-2.0
 ANCHOR_T_MAX=${ANCHOR_T_MAX:-1.0}             # only anchor for t<this (1.0=all; 0.5=reliable low-noise regime)
 COND_DIM=${COND_DIM:-0}                        # cross-attention conditioning token channels (0=off, concat-only; try 64/128)
-FLOW_SOURCE=${FLOW_SOURCE:-noise}             # flow ODE start: noise | t2w (image-to-image structural prior)
+# flow ODE start: noise | t2w | pregad. `pregad` integrates PRE-CONTRAST -> POST,
+# i.e. the physical path of contrast arriving, and is the 2-timepoint case of the
+# continuous-time Tier-2 formulation. Requires USE_PREGAD=1.
+FLOW_SOURCE=${FLOW_SOURCE:-noise}
 VAE_JOINT=${VAE_JOINT:-0}                      # 1 = train VAE on DCE+T2w (sound encode(T2w) for FLOW_SOURCE=t2w)
 FLOW_ADV_WEIGHT=${FLOW_ADV_WEIGHT:-0.0}       # flow adversarial head (cond patch-disc on decoded pred); 0=off, try 0.1
 FLOW_FEAT_WEIGHT=${FLOW_FEAT_WEIGHT:-1.0}     # feature-matching weight for the flow adversarial head

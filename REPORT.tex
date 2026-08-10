@@ -278,6 +278,16 @@ less smooth, which reads as more realistic while localizing worse.
 smoothness-biased and therefore favours the GAN's failure mode; and the flow's objective is
 effectively ROI-unweighted (\S4). A selection-metric ablation has not been run.
 
+\flag{The 2D ranking reverses under pre-contrast conditioning.} With the fourth channel the
+2D pixel-space flow reaches $\texttt{roi\_pearson}=0.439$ against the 2D GAN's $0.293$ ---
+the opposite of every prior comparison --- and the 3D flow gains more than the 3D GAN
+($+0.097$ vs $+0.058$; PZ $+0.148$ vs $+0.112$), halving the 3D gap from $0.113$ to $0.066$.
+This is consistent with the flow's characteristic failure having been amplitude
+(over-dispersion, and worse than a constant predictor on MAE), which is exactly what
+pre-contrast repairs. Both 2D numbers are $n=1$ and there is no 2D noise floor yet, so the
+reversal is not established --- but ``the GAN wins'' can no longer be stated as a general
+result.
+
 \paragraph{Peripheral zone.} $r_{\text{PZ}}=0.339$ against $r_{\text{TZ}}=0.522$ for the
 base GAN. PZ is where most clinically significant cancer arises and where DCE drives the
 PI-RADS upgrade rule, so this is the clinically weakest region. Pre-contrast conditioning
@@ -411,10 +421,26 @@ still short of the oracle) is plausibly the second, which de-identification remo
 headers and which no image contains. Clinically this costs nothing: a pre-contrast $T_1$
 requires no gadolinium, so the premise of the work is intact.
 
-\flag{Remaining caveat.} These are single runs. The large movements (passthrough margin,
-brightness tracking, spread) are many multiples of the noise floor; the
-$+0.045$ \texttt{roi\_pearson} gain over the base GAN is only $\approx2.6\times$ and would
-benefit from seed repeats.
+\paragraph{Seed repeats.} Four runs at seeds $0$--$3$ with the split held fixed
+(\texttt{-{}-split-seed 0}), against $n=2$ without pre-contrast:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+& no pre-contrast ($n{=}2$) & $+$ pre-contrast ($n{=}4$) \\
+\midrule
+\texttt{roi\_pearson} & 0.482,\,0.466 & $\mathbf{0.532\pm0.024}$ \\
+\texttt{ssim\_roi} & 0.397,\,0.389 & $0.453\pm0.018$ \\
+PZ \texttt{roi\_pearson} & 0.339,\,0.330 & $\mathbf{0.447\pm0.024}$ \\
+\texttt{p75\_corr} & 0.357,\,0.081 & $0.748\pm0.028$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The groups do not overlap: the \emph{worst} pre-contrast run ($0.500$) exceeds the
+\emph{best} run without ($0.482$). PZ separates by $0.112$, $\approx4.7\times$ the standard
+deviation. The measured $\mathrm{sd}=0.024$ also revises the earlier noise estimate upward
+from $0.017$, which was extrapolated from a single replicate pair.
 
 \section{Reliability}
 
@@ -484,7 +510,16 @@ iso-versus-no-iso A/B ($0.020$ --- inside noise, so iso is justified on correctn
 only). This is one replicate pair, bounding the magnitude but not a standard deviation;
 $\ge3$ seeds are required.
 
-\paragraph{Why \texttt{p75\_corr} is $16\times$ worse.} \texttt{roi\_pearson} averages $N=550$
+\paragraph{A prediction that held: instability is a property of the target, not the metric.}
+\texttt{p75\_corr} swung $0.276$ between two \emph{identical} runs without pre-contrast.
+Across four pre-contrast runs it is $\pm0.028$ --- a tenfold reduction, same metric, same
+code, same cohort. The only change is that the quantity it measures became predictable.
+This is the sharpest available evidence for the claim below: the metric was unstable
+\emph{because} its target was not determined by the inputs, and supplying the missing input
+removed the instability. It was predicted before the pre-contrast run and is therefore a
+falsifiable test rather than a post-hoc reading.
+
+\paragraph{Why \texttt{p75\_corr} was $16\times$ worse.} \texttt{roi\_pearson} averages $N=550$
 per-case values, suppressing variance by $\sqrt N$. \texttt{p75\_corr} is a single
 cross-patient correlation measuring the \emph{amplitude} dimension --- precisely what nothing
 in the loss constrains. \textbf{Reproducibility tracks identifiability}: the well-determined
