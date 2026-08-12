@@ -203,6 +203,27 @@ def run_model_checks():
             with torch.no_grad():
                 assert f.sample(x, steps=2, seed=0).shape == (1, 1, 64, 64)
 
+    @check("AutoencoderKL2D round-trips and exposes the first-stage interface")
+    def _():
+        from .models import AutoencoderKL2D
+        from .models.flow2d import LatentFlowMatching2D
+        fs = AutoencoderKL2D(latent_channels=4, base_ch=8, ch_mults=(1, 2))
+        x = torch.randn(2, 1, 64, 64)
+        post = fs.encode(x); z = post.sample()
+        assert z.shape == (2, 4, 32, 32), z.shape          # ch_mults=(1,2) -> one /2
+        assert fs.decoder(z).shape == x.shape
+        assert fs.decode(z).shape == x.shape               # scaling-inverting variant
+        assert float(post.kl()) == float(post.kl())        # finite
+        for attr in ("latent_channels", "scaling_factor", "latent_shift"):
+            assert hasattr(fs, attr), attr
+        # the latent flow must accept it exactly as it accepts MedVAE
+        m = LatentFlowMatching2D(fs, cond_ch=3, base=8)
+        with torch.no_grad():
+            assert m.sample(torch.randn(2, 3, 64, 64), steps=2, seed=0).shape == x.shape
+        # and no transposed convs crept into the decoder
+        assert not [n for n, mod in fs.named_modules()
+                    if isinstance(mod, torch.nn.ConvTranspose2d)]
+
     @check("--flow-source pregad selects channel 3 and refuses without --use-pregad")
     def _():
         import argparse as _a

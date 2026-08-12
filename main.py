@@ -439,7 +439,7 @@ def parse_args():
     p.add_argument("--z-dim", type=int, default=128)
     p.add_argument("--n-upsamples", type=int, default=4, help="GAN up/down sampling depth")
     p.add_argument("--latent-channels", type=int, default=4)
-    p.add_argument("--first-stage", choices=["vae", "wavelet", "medvae"], default="vae",
+    p.add_argument("--first-stage", choices=["vae", "wavelet", "medvae", "pixel"], default="vae",
                    help="LDM first stage: 'vae' (learned AutoencoderKL3D, default); 'wavelet' "
                         "(fixed invertible 3D Haar transform, FlowLet-style, lossless so the "
                         "--anchor-weight recon is exact); 'medvae' (frozen MedVAE foundation VAE "

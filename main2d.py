@@ -57,6 +57,40 @@ def _fit_scaling_2d(fs, loader, device, n_batches=4):
     log.info(f"2D latent std={std:.4f} -> scaling_factor={fs.scaling_factor:.4f}")
 
 
+def _train_vae_2d(fs, loader, args, criterion, device):
+    """Train the 2D first stage on target DCE slices, then freeze it.
+
+    Mirrors the 3D build_first_stage: the flow objective lives in latent space and has
+    no clean mapping back to the prostate mask, so THIS reconstruction is where in-gland
+    fidelity is set -- hence the mask is threaded into the criterion for ROI emphasis.
+    """
+    epochs = getattr(args, "vae_epochs", 50)
+    opt = torch.optim.Adam(fs.parameters(), lr=args.lr)
+    fs.train()
+    for ep in range(epochs):
+        agg, n, t0 = {}, 0, time.time()
+        for b in loader:
+            x = b["target"].to(device)
+            mask = b["mask"].to(device)
+            # CustomLoss is 3D and RAISES on a rank mismatch, so wrap the 4D slices to
+            # (B,C,1,H,W) on the way in -- the mask is already 5D here.
+            crit2d = (lambda pr, tg, m=None: criterion(_w5(pr), _w5(tg), m)) if criterion else None
+            loss, parts = fs.loss(x, kl_weight=getattr(args, "kl_weight", 1e-6),
+                                  criterion=crit2d, mask=_w5(mask))
+            opt.zero_grad(); loss.backward(); opt.step()
+            for k, v in parts.items():
+                agg[k] = agg.get(k, 0.0) + float(v)
+            n += 1
+        if (ep + 1) % 5 == 0 or ep == epochs - 1:
+            log.info(f"[vae2d {ep+1}/{epochs}] " +
+                     "  ".join(f"{k}={v/max(n,1):.4f}" for k, v in agg.items()) +
+                     f"  ({time.time()-t0:.0f}s)")
+    fs.eval()
+    for p_ in fs.parameters():
+        p_.requires_grad_(False)
+    log.info(f"2D VAE frozen: {sum(p_.numel() for p_ in fs.parameters())/1e6:.1f}M params")
+
+
 def _slice_loader(loader3d, depth, batch_size, workers, shuffle):
     ds = SliceDCEDataset(loader3d.dataset, depth)
     if len(ds) == 0:
@@ -134,9 +168,17 @@ def main():
     # 4th channel = pre-contrast. The 2D models were hardcoded to 3, so --use-pregad
     # handed them a 4-channel tensor and the first conv raised. Matches training/gan.py.
     cond_ch = 4 if getattr(args, "use_pregad", False) else 3
-    criterion = make_criterion(args, device)
+    criterion = make_criterion(args, device)   # built before the first stage: the 2D VAE
+                                               # trains against it (ROI-weighted recon)
     is_flow = args.model != "gan"
-    is_latent = is_flow and getattr(args, "first_stage", "vae") == "medvae"
+    # 2D first stages. NOTE: before 2026-08-12, `vae` fell through to PIXEL space --
+    # there was no trained 2D autoencoder -- so runs whose config.json says
+    # first_stage="vae" (v3_2d_flow_pixel, v5_2d_flow_pixel_pregad, ...) were in fact
+    # pixel-space. `pixel` is now explicit and `vae` means what it says.
+    _fs = getattr(args, "first_stage", "vae")
+    is_medvae = is_flow and _fs == "medvae"
+    is_ownvae = is_flow and _fs == "vae"
+    is_latent = is_medvae or is_ownvae
     name = "flow2d" if is_flow else "gan2d"
 
     if getattr(args, "eval_only", False):         # match --base-ch to the trained ckpt width
@@ -151,11 +193,17 @@ def main():
                 args.base_ch = int(sd[key].shape[0])
                 log.info(f"eval-only: inferred base_ch={args.base_ch} from {ck.name}")
 
-    if is_latent:                                 # 2D MedVAE-latent CFM (crisp + foundation VAE)
-        from .models import MedVAEFirstStage
+    if is_latent:                                 # 2D latent CFM (MedVAE or our own VAE)
         from .models.flow2d import LatentFlowMatching2D
-        fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_2d"),
-                              modality=getattr(args, "medvae_modality", "mri")).to(device)
+        if is_medvae:
+            from .models import MedVAEFirstStage
+            fs = MedVAEFirstStage(model_name=getattr(args, "medvae_model", "medvae_4_1_2d"),
+                                  modality=getattr(args, "medvae_modality", "mri")).to(device)
+        else:                                     # train our own 2D VAE, then freeze it
+            from .models import AutoencoderKL2D
+            fs = AutoencoderKL2D(latent_channels=args.latent_channels, base_ch=args.base_ch,
+                                 ch_mults=tuple(args.ch_mults)).to(device)
+            _train_vae_2d(fs, train, args, criterion, device)
         _fit_scaling_2d(fs, train, device)
         model = LatentFlowMatching2D(fs, cond_ch=cond_ch, base=args.base_ch).to(device)
         opt = torch.optim.Adam(model.unet.parameters(), lr=args.lr)
