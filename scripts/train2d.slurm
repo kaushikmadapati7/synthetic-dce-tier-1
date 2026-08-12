@@ -25,6 +25,11 @@ SAMPLE_STEPS=${SAMPLE_STEPS:-50}              # flow ODE steps (ignored by gan)
 DATA_ROOT=${DATA_ROOT:-/mnt/fac/CX000018_DS2/yanglab/Prostate_data_all/Bao_DCE}
 OUTPUT_DIR=${OUTPUT_DIR:-runs/px2d_${SLURM_JOB_ID:-local}}
 SPATIAL_SIZE=${SPATIAL_SIZE:-"32 256 256"}   # D H W; D = #slices/case, H W = native-ish in-plane
+SEED=${SEED:-0}                               # training init/shuffle seed
+SPLIT_SEED=${SPLIT_SEED:-}                    # '' = follow SEED. Hold this FIXED while
+                                              # sweeping SEED for repeats, else each repeat
+                                              # reshuffles the cohort and you measure split
+                                              # variance on top of training variance.
 EPOCHS=${EPOCHS:-100}
 BATCH_SIZE=${BATCH_SIZE:-16}                  # 2D -> big batches fit
 BASE_CH=${BASE_CH:-64}
@@ -77,12 +82,19 @@ FS_ARGS=(--first-stage "${FIRST_STAGE}")
 if [ "${FIRST_STAGE}" = "medvae" ]; then FS_ARGS+=(--medvae-model "${MEDVAE_MODEL}"); fi
 FID_ARG=--no-fid; if [ "${COMPUTE_FID}" = "1" ]; then FID_ARG=--compute-fid; fi
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} px2d  cohort=${UCSF_ROOT:-$DATA_ROOT} out=${OUTPUT_DIR}"
+# Print the toggles that fail SILENTLY when unsupported or mistyped. SEED was absent
+# from this script entirely, so SEED=$S on four "seed repeats" was a no-op and all four
+# ran identically -- which is exactly what an unexplained sd of 0.000 looks like.
+echo "effective: seed=${SEED} split_seed=${SPLIT_SEED:-<=seed} pregad=${USE_PREGAD}" \
+     "model=${MODEL}/${FIRST_STAGE} spatial=(${SPATIAL_SIZE})" \
+     "dce_norm=${DCE_NORM}/k=${DCE_ROBUST_K} extra='${EXTRA_ARGS}'"
 
 srun python -m tier1_static.main2d \
   --model "${MODEL}" --sample-steps "${SAMPLE_STEPS}" \
   "${DATA_ARGS[@]}" "${FS_ARGS[@]}" --output-dir "${OUTPUT_DIR}" \
   --anchor-weight "${ANCHOR_WEIGHT}" --anchor-t-max "${ANCHOR_T_MAX}" \
   --spatial-size ${SPATIAL_SIZE} --epochs "${EPOCHS}" --batch-size "${BATCH_SIZE}" \
+  --seed "${SEED}" ${SPLIT_SEED:+--split-seed "${SPLIT_SEED}"} \
   --base-ch "${BASE_CH}" --lr "${LR}" --ckpt-every "${CKPT_EVERY}" --val-frac "${VAL_FRAC}" \
   --num-workers "${SLURM_CPUS_PER_TASK:-8}" \
   --dce-norm "${DCE_NORM}" --dce-robust-k "${DCE_ROBUST_K}" --t2w-norm "${T2W_NORM}" \
