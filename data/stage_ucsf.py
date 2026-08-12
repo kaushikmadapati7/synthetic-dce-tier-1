@@ -57,8 +57,28 @@ SWEEP_BELOW = 1.5
 # ...and if the sweep shows the study DOES enhance this much, the timing was wrong,
 # not the study: re-select from the curve instead of trusting the timestamps.
 RESELECT_ABOVE = 1.5
-# curve-based target = first phase reaching this fraction of max (plateau onset)
+# curve-based target = first phase reaching this fraction of max ENHANCEMENT
+# (plateau onset). See plateau_threshold: the fraction is of baseline-SUBTRACTED
+# enhancement, not of raw signal.
 PLATEAU_FRAC = 0.9
+
+
+def plateau_threshold(enh_max: float, frac: float = PLATEAU_FRAC) -> float:
+    """Ratio threshold for plateau onset, expressed in BASELINE-SUBTRACTED enhancement.
+
+    The curve is stored as ratios r(t) = S(t)/S(0), so relative enhancement is
+    r(t) - 1 (the clinical convention). "90% of max" must therefore be 90% of
+    r_max - 1, not 90% of r_max:
+
+        r(t) - 1 >= frac * (r_max - 1)   =>   r(t) >= 1 + frac * (r_max - 1)
+
+    Using frac * r_max instead counts the pre-contrast BASELINE as part of the
+    enhancement, so the criterion fires early -- at (frac - b)/(1 - b) of the true
+    enhancement, where b = S(0)/max(S). At b = 0.4 that is 83%, not 90%. The
+    threshold stays scale-free either way (ratios cancel receiver gain); the bug was
+    the missing baseline subtraction, not the use of a ratio.
+    """
+    return 1.0 + frac * (enh_max - 1.0)
 
 
 MAX_INTERLEAVE = 4
@@ -220,7 +240,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
                     # 90% of max. That is what target_time=120s approximates anyway, and
                     # it needs no trustworthy timestamps.
                     if enh_max >= RESELECT_ABOVE:
-                        thr = PLATEAU_FRAC * enh_max
+                        thr = plateau_threshold(enh_max)
                         j = next((jj for jj, v in zip(js, curve) if v >= thr), enh_max_idx)
                         if j != idx:
                             idx, select_mode = j, "curve"

@@ -428,6 +428,22 @@ def run_data_checks():
         r = stage_one("INTER", **common, min_enh=0.0)
         assert r["interleave"] == 2 and r["phase_idx"] % 2 == 1 and r["enh_ratio"] > 2.0, r
 
+    @check("plateau onset uses BASELINE-SUBTRACTED enhancement, not raw signal")
+    def _():
+        from .data.stage_ucsf import plateau_threshold, PLATEAU_FRAC
+        # r_max = 2.5 means the gland got 2.5x brighter, i.e. 1.5 of enhancement.
+        # 90% of THAT is 1.35, so the threshold is r = 2.35 -- not 0.9*2.5 = 2.25.
+        assert abs(plateau_threshold(2.5) - 2.35) < 1e-9, plateau_threshold(2.5)
+        assert abs(plateau_threshold(2.0) - 1.90) < 1e-9
+        assert abs(plateau_threshold(1.0) - 1.00) < 1e-9      # no enhancement -> no offset
+        # must be STRICTER than the old raw-signal form for any real enhancement
+        for rmax in (1.5, 2.0, 2.5, 3.0):
+            assert plateau_threshold(rmax) > PLATEAU_FRAC * rmax
+        # and it must recover exactly frac of the enhancement
+        for rmax in (1.5, 2.5, 4.0):
+            got = (plateau_threshold(rmax) - 1.0) / (rmax - 1.0)
+            assert abs(got - PLATEAU_FRAC) < 1e-9, got
+
     @check("unusable timing re-selects from the enhancement curve, not phase 0")
     def _():
         r = stage_one("BADTIME", **common, min_enh=0.0)
