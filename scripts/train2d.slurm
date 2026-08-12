@@ -9,7 +9,7 @@
 # is ~34G, plus val/test caches (~10G) and torch/CUDA overhead. 64G OOM-killed the
 # first v3 attempt during slice-prep; leave headroom.
 #SBATCH --mem=96G
-#SBATCH --time=12:00:00
+#SBATCH --time=18:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 # 2D pixel-space pix2pix (the reproducibility / data-scale lever) on CHPC.
@@ -51,7 +51,14 @@ TEST_HOSPITALS=${TEST_HOSPITALS:-jiulong}
 # steps instead of ~35k.
 UCSF_ROOT=${UCSF_ROOT:-}                      # staged root from stage_ucsf.py
 UCSF_TEST_FRAC=${UCSF_TEST_FRAC:-0.15}
-FIRST_STAGE=${FIRST_STAGE:-vae}               # vae | medvae (2D: use medvae_4_1_2d)
+# pixel  = no encoder (was the silent fall-through for `vae` before 2026-08-12)
+# vae     = train AutoencoderKL2D on our data, then freeze
+# medvae  = frozen MedVAE foundation VAE (use medvae_4_1_2d)
+FIRST_STAGE=${FIRST_STAGE:-pixel}
+VAE_EPOCHS=${VAE_EPOCHS:-30}                  # FIRST_STAGE=vae: first-stage epochs
+KL_WEIGHT=${KL_WEIGHT:-1e-6}
+LATENT_CHANNELS=${LATENT_CHANNELS:-4}
+CH_MULTS=${CH_MULTS:-"1 2 4"}
 MEDVAE_MODEL=${MEDVAE_MODEL:-medvae_4_1_2d}   # 1-CHANNEL 2D model (…_4_3_2d is 3-channel)
 ANCHOR_WEIGHT=${ANCHOR_WEIGHT:-0.0}           # image-space anchor for the latent flow
 ANCHOR_T_MAX=${ANCHOR_T_MAX:-0.3}
@@ -86,7 +93,7 @@ echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} px2d  cohort=${UCSF_ROOT:-$DATA_R
 # from this script entirely, so SEED=$S on four "seed repeats" was a no-op and all four
 # ran identically -- which is exactly what an unexplained sd of 0.000 looks like.
 echo "effective: seed=${SEED} split_seed=${SPLIT_SEED:-<=seed} pregad=${USE_PREGAD}" \
-     "model=${MODEL}/${FIRST_STAGE} spatial=(${SPATIAL_SIZE})" \
+     "model=${MODEL}/${FIRST_STAGE} vae_epochs=${VAE_EPOCHS} spatial=(${SPATIAL_SIZE})" \
      "dce_norm=${DCE_NORM}/k=${DCE_ROBUST_K} extra='${EXTRA_ARGS}'"
 
 srun python -m tier1_static.main2d \
@@ -95,6 +102,8 @@ srun python -m tier1_static.main2d \
   --anchor-weight "${ANCHOR_WEIGHT}" --anchor-t-max "${ANCHOR_T_MAX}" \
   --spatial-size ${SPATIAL_SIZE} --epochs "${EPOCHS}" --batch-size "${BATCH_SIZE}" \
   --seed "${SEED}" ${SPLIT_SEED:+--split-seed "${SPLIT_SEED}"} \
+  --vae-epochs "${VAE_EPOCHS}" --kl-weight "${KL_WEIGHT}" \
+  --latent-channels "${LATENT_CHANNELS}" --ch-mults ${CH_MULTS} \
   --base-ch "${BASE_CH}" --lr "${LR}" --ckpt-every "${CKPT_EVERY}" --val-frac "${VAL_FRAC}" \
   --num-workers "${SLURM_CPUS_PER_TASK:-8}" \
   --dce-norm "${DCE_NORM}" --dce-robust-k "${DCE_ROBUST_K}" --t2w-norm "${T2W_NORM}" \
