@@ -408,6 +408,7 @@ def run_data_checks():
     case("BADTIME", [0.0] + [None] * 11)
     case("ODDBVAL", times, bval="b0400")          # b-value outside the old hardcoded list
     case("ANCHOR", times)                         # multi-timepoint anchor backfill
+    case("BACKFILL", times)                       # anchors added to an existing case
     common = dict(main_root=str(MAIN), dce_root=str(DCE), out_root=str(OUT),
                   target_time=72.0, t_max=600.0, dwi_bvalue="1000")
 
@@ -451,6 +452,26 @@ def run_data_checks():
         # corrupt timestamps -> no fabricated time grid
         rb = stage_one("BADTIME", **common, min_enh=0.0, anchor_times=ANCH, overwrite=True)
         assert rb["select_mode"] == "curve" and rb["anchors"] is None, rb
+
+    @check("anchor backfill only ADDS files; core artifacts are untouched")
+    def _():
+        from .data.stage_ucsf import anchor_name
+        import time as _t
+        stage_one("BACKFILL", **common, min_enh=0.0)               # normal single-phase
+        core = [OUT / "BACKFILL" / n for n in
+                ("DCE_to_T2W.nii.gz", "T2W.nii.gz", "ADC_to_T2W.nii.gz")]
+        before = {p_: (p_.stat().st_mtime_ns, p_.stat().st_size) for p_ in core}
+        _t.sleep(0.01)
+        r = stage_one("BACKFILL", **common, min_enh=0.0, anchor_times=(45.0, 90.0))
+        # the core files must NOT be rewritten -- a rewrite mid-run corrupts readers
+        for p_ in core:
+            assert (p_.stat().st_mtime_ns, p_.stat().st_size) == before[p_], \
+                f"backfill rewrote {p_.name}"
+        for t in (45.0, 90.0):
+            assert (OUT / "BACKFILL" / anchor_name(t)).exists()
+        assert not r.get("cached")
+        # no temp files left behind by the atomic writers
+        assert not list((OUT / "BACKFILL").glob("*.tmp")), "stray .tmp files"
 
     @check("--min-enh drops never-enhancing studies and removes any stale staged dir")
     def _():

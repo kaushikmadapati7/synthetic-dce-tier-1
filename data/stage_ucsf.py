@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -88,6 +89,26 @@ def _interleave_factor(dce_dir):
         return 1
 
 
+def _write_atomic(img, dst_path: Path):
+    """Write via a temp file + os.replace, which is atomic on POSIX.
+
+    Staging writes into the same tree training reads. A plain WriteImage leaves the
+    file partially written for as long as compression takes, and any DataLoader worker
+    that opens it in that window dies with "Unable to determine ImageIO reader" --
+    which kills the whole run, since every job walks the full cohort. os.replace means
+    a reader sees either the old file or the new one, never a half-written one.
+    """
+    tmp = dst_path.with_name(dst_path.name + ".tmp")
+    sitk.WriteImage(img, str(tmp), True)
+    os.replace(tmp, dst_path)
+
+
+def _copy_atomic(src, dst_path: Path):
+    tmp = dst_path.with_name(dst_path.name + ".tmp")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst_path)
+
+
 def anchor_name(t: float) -> str:
     """Filename for the anchor phase nearest `t` seconds post-injection."""
     return f"DCE_t{int(round(t)):03d}_to_T2W.nii.gz"
@@ -105,9 +126,18 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
     # version look complete, so a re-stage adding new anchors would silently skip the
     # entire cohort and report success. Same failure class as the --overwrite pass that
     # once resurrected 729 pruned cases: the resume predicate must track the outputs.
-    want = [dst / "DCE_pre_to_T2W.nii.gz"] + [dst / anchor_name(t) for t in anchor_times]
-    if meta_p.exists() and all(p.exists() for p in want) and not overwrite:
+    core = [dst / n for n in ("DCE_to_T2W.nii.gz", "DCE_pre_to_T2W.nii.gz", "T2W.nii.gz",
+                              "ADC_to_T2W.nii.gz", "DWI_to_T2W.nii.gz")]
+    core_ok = meta_p.exists() and all(p.exists() for p in core)
+    need_anchor = [t for t in anchor_times if not (dst / anchor_name(t)).exists()]
+    if core_ok and not need_anchor and not overwrite:
         return {**json.loads(meta_p.read_text()), "cached": True}
+    # Already staged, only anchors missing -> ADD those and touch nothing else. Without
+    # this an anchor backfill rewrites every core file for all 4246 cases, and any
+    # training job reading the tree at the time dies.
+    backfill_only = core_ok and bool(need_anchor) and not overwrite
+    if backfill_only:
+        anchor_times = tuple(need_anchor)
 
     dce_dir = Path(dce_root) / pid / "DCE"
     t2 = _resolve_stem(subj, UCSF_STEMS["t2w"])
@@ -229,17 +259,18 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
                 "enh_ratio": enh, "enh_max": enh_max}
 
     dst.mkdir(parents=True, exist_ok=True)
-    sitk.WriteImage(phase, str(dst / "DCE_to_T2W.nii.gz"), True)     # True = compress
-    sitk.WriteImage(pre_phase, str(dst / "DCE_pre_to_T2W.nii.gz"), True)
+    if not backfill_only:
+        _write_atomic(phase, dst / "DCE_to_T2W.nii.gz")
+        _write_atomic(pre_phase, dst / "DCE_pre_to_T2W.nii.gz")
+        for src, name in ((t2, "T2W.nii.gz"), (adc, "ADC_to_T2W.nii.gz"),
+                          (dwi, "DWI_to_T2W.nii.gz")):
+            _copy_atomic(src, dst / name)
+        for name in COPY_FILES:
+            p = subj / name
+            if p.exists():
+                _copy_atomic(p, dst / name)
     for fname, a in (anchors or {}).items():
-        sitk.WriteImage(a.pop("phase"), str(dst / fname), True)
-    for src, name in ((t2, "T2W.nii.gz"), (adc, "ADC_to_T2W.nii.gz"),
-                      (dwi, "DWI_to_T2W.nii.gz")):
-        shutil.copyfile(src, dst / name)
-    for name in COPY_FILES:
-        p = subj / name
-        if p.exists():
-            shutil.copyfile(p, dst / name)
+        _write_atomic(a.pop("phase"), dst / fname)
 
     # `series` is the only scanner covariate that survived de-identification (the DICOM
     # Manufacturer tag is wiped to "NA"): TWIST -> Siemens, DISCO -> GE (Dixon, and the
@@ -258,7 +289,14 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
            "series": times_j.get("series"), "reg": times_j.get("reg"),
            "anchors": {k: {kk: vv for kk, vv in v.items() if kk != "phase"}
                        for k, v in (anchors or {}).items()} or None}
-    meta_p.write_text(json.dumps(rec, indent=1))
+    if backfill_only and meta_p.exists():        # keep the original record, add anchors
+        try:
+            rec = {**json.loads(meta_p.read_text()), "anchors": rec.get("anchors")}
+        except Exception:
+            pass
+    tmp = meta_p.with_name(meta_p.name + ".tmp")
+    tmp.write_text(json.dumps(rec, indent=1))
+    os.replace(tmp, meta_p)
     return rec
 
 
