@@ -35,6 +35,12 @@ OUT=${OUT:-/mnt/scratch/user/${USER}/UCSF_staged}
 TARGET_TIME=${TARGET_TIME:-120}     # s post pre-contrast; 120 = stable plateau
 DWI_BVALUE=${DWI_BVALUE:-1000}
 MIN_ENH=${MIN_ENH:-0}               # e.g. 1.2 to drop non-enhancing cases
+# Multi-timepoint (Tier-2) anchors, seconds post-injection, on a COMMON time grid so
+# heterogeneous protocols (26-70 phases, 1.7-13s cadence) become comparable. 0s and
+# TARGET_TIME already ship as DCE_pre_to_T2W / DCE_to_T2W. Empty = single-phase only.
+# Dense through wash-in (55-90s), sparse across the plateau -- that is where PI-RADS
+# curve types separate. 240s is the late anchor: 92% of cases reach it, 300s only 50%.
+ANCHOR_TIMES=${ANCHOR_TIMES:-}
 LIMIT=${LIMIT:-0}
 EXTRA_ARGS=${EXTRA_ARGS:-}
 
@@ -50,6 +56,8 @@ set -u
 SHARD=${SLURM_ARRAY_TASK_ID:-0}
 NSHARD=${SLURM_ARRAY_TASK_COUNT:-1}
 echo "host=$(hostname) job=${SLURM_ARRAY_JOB_ID:-NA} shard=${SHARD}/${NSHARD} out=${OUT}"
+echo "effective: target_time=${TARGET_TIME} min_enh=${MIN_ENH} dwi_b=${DWI_BVALUE}" \
+     "anchors='${ANCHOR_TIMES:-<none, single-phase>}' extra='${EXTRA_ARGS}'"
 
 # Preflight: /mnt/fac is not mounted on every compute node (ENODEV / "No such
 # device"), which otherwise surfaces as an opaque traceback deep in a glob. Fail
@@ -65,6 +73,7 @@ done
 python -m tier1_static.data.stage_ucsf \
   --main-root "${FAC}" --dce-root "${DCE}" --out "${OUT}" \
   --target-time "${TARGET_TIME}" --dwi-bvalue "${DWI_BVALUE}" --min-enh "${MIN_ENH}" \
+  ${ANCHOR_TIMES:+--anchor-times ${ANCHOR_TIMES}} \
   --workers "${SLURM_CPUS_PER_TASK:-8}" --limit "${LIMIT}" \
   --shard "${SHARD}" --num-shards "${NSHARD}" ${EXTRA_ARGS}
 
