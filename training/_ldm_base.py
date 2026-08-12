@@ -35,6 +35,13 @@ def _new_first_stage(args, device):
     encode/decode/decoder/scaling_factor/latent_shift/latent_channels interface so
     the LDM classes are agnostic. Returns (module, latent_channels)."""
     stage = getattr(args, "first_stage", "vae")
+    if stage == "pixel":
+        # would otherwise fall through to AutoencoderKL3D and silently TRAIN a VAE when
+        # pixel space was asked for. True 3D pixel-space is ~10-20x the compute of the
+        # latent path; use --first-stage wavelet (lossless) as the no-bottleneck arm.
+        raise ValueError("--first-stage pixel is not supported in 3D (a full-resolution "
+                         "3D UNet is ~10-20x the latent cost). Use `wavelet`: an "
+                         "invertible Haar transform, lossless, so no encoder bottleneck.")
     if stage == "wavelet":
         fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
         return fs, fs.latent_channels
@@ -145,6 +152,13 @@ def build_first_stage(args, train_loader, criterion, device):
     """Return a ready-to-use, frozen first stage. Wavelet: fit per-subband stats
     (no training, it's lossless). VAE: train it (or load --vae-ckpt)."""
     stage = getattr(args, "first_stage", "vae")
+    if stage == "pixel":
+        # would otherwise fall through to AutoencoderKL3D and silently TRAIN a VAE when
+        # pixel space was asked for. True 3D pixel-space is ~10-20x the compute of the
+        # latent path; use --first-stage wavelet (lossless) as the no-bottleneck arm.
+        raise ValueError("--first-stage pixel is not supported in 3D (a full-resolution "
+                         "3D UNet is ~10-20x the latent cost). Use `wavelet`: an "
+                         "invertible Haar transform, lossless, so no encoder bottleneck.")
     if stage == "wavelet":
         fs = WaveletFirstStage3D(levels=getattr(args, "wavelet_levels", 1)).to(device)
         fs.fit(train_loader, device)

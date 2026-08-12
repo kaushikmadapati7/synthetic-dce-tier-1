@@ -176,6 +176,10 @@ def main():
     # first_stage="vae" (v3_2d_flow_pixel, v5_2d_flow_pixel_pregad, ...) were in fact
     # pixel-space. `pixel` is now explicit and `vae` means what it says.
     _fs = getattr(args, "first_stage", "vae")
+    if _fs not in ("pixel", "vae", "medvae"):
+        # `wavelet` would otherwise fall through to pixel space without a word
+        raise ValueError(f"--first-stage {_fs!r} is not supported in 2D; "
+                         f"use pixel | vae | medvae")
     is_medvae = is_flow and _fs == "medvae"
     is_ownvae = is_flow and _fs == "vae"
     is_latent = is_medvae or is_ownvae
