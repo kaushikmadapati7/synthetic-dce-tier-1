@@ -471,7 +471,7 @@ def run_data_checks():
             assert (OUT / "BACKFILL" / anchor_name(t)).exists()
         assert not r.get("cached")
         # no temp files left behind by the atomic writers
-        assert not list((OUT / "BACKFILL").glob("*.tmp")), "stray .tmp files"
+        assert not list((OUT / "BACKFILL").glob(".tmp_*")), "stray .tmp_ files"
 
     @check("--min-enh drops never-enhancing studies and removes any stale staged dir")
     def _():

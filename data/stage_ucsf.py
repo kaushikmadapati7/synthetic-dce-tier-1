@@ -98,13 +98,17 @@ def _write_atomic(img, dst_path: Path):
     which kills the whole run, since every job walks the full cohort. os.replace means
     a reader sees either the old file or the new one, never a half-written one.
     """
-    tmp = dst_path.with_name(dst_path.name + ".tmp")
+    # NOTE: the temp name must KEEP the .nii.gz extension -- SimpleITK selects its
+    # writer from the extension, so "<name>.nii.gz.tmp" fails with "Unable to
+    # determine ImageIO writer". The ".tmp_" prefix keeps it out of the loader's
+    # globs (DWI_b*, *mask*) while _resolve_stem matches exact names anyway.
+    tmp = dst_path.with_name(".tmp_" + dst_path.name)
     sitk.WriteImage(img, str(tmp), True)
     os.replace(tmp, dst_path)
 
 
 def _copy_atomic(src, dst_path: Path):
-    tmp = dst_path.with_name(dst_path.name + ".tmp")
+    tmp = dst_path.with_name(".tmp_" + dst_path.name)
     shutil.copyfile(src, tmp)
     os.replace(tmp, dst_path)
 
@@ -294,7 +298,7 @@ def stage_one(pid, main_root, dce_root, out_root, target_time, t_max, dwi_bvalue
             rec = {**json.loads(meta_p.read_text()), "anchors": rec.get("anchors")}
         except Exception:
             pass
-    tmp = meta_p.with_name(meta_p.name + ".tmp")
+    tmp = meta_p.with_name(".tmp_" + meta_p.name)
     tmp.write_text(json.dumps(rec, indent=1))
     os.replace(tmp, meta_p)
     return rec
