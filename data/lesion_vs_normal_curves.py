@@ -64,7 +64,21 @@ def load_case(pid, a):
     """Everything needed for one case, or None if unusable. Raises on real errors."""
     d = os.path.join(a.dce_root, pid, "DCE")
     meta = json.load(open(os.path.join(d, "dce_times.json")))
-    img = sitk.ReadImage(os.path.join(d, "DCE_4D_to_T2W.nii.gz"))
+    p4d = os.path.join(d, "DCE_4D_to_T2W.nii.gz")
+
+    # Header first: GetSize() without decompressing the volume, so an oversized
+    # series is skipped rather than thrashing a shared login node for minutes.
+    r = sitk.ImageFileReader()
+    r.SetFileName(p4d)
+    r.ReadImageInformation()
+    dims = tuple(r.GetSize())
+    gb = float(np.prod(dims, dtype=np.float64)) * 4 / 1e9
+    print(f"  {pid} dims={dims} ~{gb:.1f}GB in RAM", flush=True)
+    if gb > a.max_gb:
+        print(f"    skipped: exceeds --max-gb {a.max_gb}", flush=True)
+        return None
+
+    img = sitk.ReadImage(p4d)
     n = img.GetSize()[3] if img.GetDimension() > 3 else 1
     t = np.asarray([np.nan if p.get("rel_time_s") is None else p["rel_time_s"]
                     for p in meta["phases"]], float)
@@ -106,6 +120,7 @@ def load_case(pid, a):
     sup = gland | lesion
     vals = np.stack([sitk.GetArrayFromImage(img[:, :, :, k])[sup].astype(np.float32)
                      for k in range(n)])                       # (n_phases, n_sup)
+    del img                                    # release the 4D before the maths
     enh = vals - vals[0:1]
     idx = {k: v[sup] for k, v in sel.items()}
 
@@ -131,6 +146,8 @@ def main(argv=None):
                     help="CHOSEN: floor for a stable per-region mean")
     ap.add_argument("--tz-label", type=int, default=1, help="manifest says 1=TZ")
     ap.add_argument("--pz-label", type=int, default=2, help="manifest says 2=PZ")
+    ap.add_argument("--max-gb", type=float, default=3.0,
+                    help="skip a 4D series whose in-RAM size exceeds this")
     ap.add_argument("--n", type=int, default=60, help="cases to analyse")
     ap.add_argument("--plot", type=int, default=9, help="cases to draw individually")
     ap.add_argument("--out", default="lesion_vs_normal.png")
@@ -166,10 +183,10 @@ def main(argv=None):
         cases.append(c)
         lr = end_over_peak(c["curves"]["lesion"])
         nr = end_over_peak(c["curves"]["normal"])
-        print(f"  {c['pid']} n={c['n']:3d} span={c['t'][-1]:5.0f}s  "
+        print(f"    -> n={c['n']:3d} span={c['t'][-1]:5.0f}s  "
               f"lesion {c['nvox']['lesion']:6d}vx end/peak={lr:5.2f}  "
               f"normal end/peak={nr:5.2f}  diff={lr-nr:+5.2f}  "
-              f"outside gland={c['frac_outside']:.0%}")
+              f"outside gland={c['frac_outside']:.0%}", flush=True)
 
     if not cases:
         print("  no usable cases")
