@@ -52,12 +52,38 @@ def usable_times(t):
     return bool(np.isfinite(t).all() and np.all(np.diff(t) >= 0) and t.max() < 3600)
 
 
-def end_over_peak(enh):
-    """enh is (n_phases,) or (n_phases, n_voxels). NaN where nothing enhanced."""
-    peak = enh.max(axis=0)
+def end_over_peak(enh, topk=1):
+    """enh is (n_phases,) or (n_phases, n_voxels). NaN where nothing enhanced.
+
+    `topk`>1 averages the top-k phases for the peak and the last-k for the end.
+    A plain max() latches onto the largest positive noise excursion, which
+    inflates the peak and so DEFLATES end/peak -- and the bias grows as the ROI
+    shrinks, which is exactly the difference between a lesion and whole-gland
+    normal tissue. topk is the cheap half of guarding against that; the
+    size-matched null ROIs below are the real control.
+    """
+    k = max(1, min(int(topk), enh.shape[0]))
+    peak = enh.max(axis=0) if k == 1 else np.sort(enh, axis=0)[-k:].mean(axis=0)
+    end = enh[-1] if k == 1 else enh[-k:].mean(axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        r = np.where(peak > 0, enh[-1] / peak, np.nan)
-    return r
+        return np.where(peak > 0, end / peak, np.nan)
+
+
+def matched_null(enh, coords, normal_idx, n_vox, spacing_zyx, n_draw, rng, topk):
+    """end/peak for spatially CONTIGUOUS normal ROIs of the same voxel count.
+
+    Contiguous, not scattered: DCE noise is spatially correlated, so a scattered
+    sample of normal voxels averages down more effectively than a compact lesion
+    of the same size and would understate the null.
+    """
+    out = []
+    pool = coords[normal_idx] * spacing_zyx          # physical mm
+    for _ in range(n_draw):
+        s = rng.integers(len(normal_idx))
+        d = ((pool - pool[s]) ** 2).sum(axis=1)
+        take = normal_idx[np.argpartition(d, min(n_vox, len(d) - 1))[:n_vox]]
+        out.append(float(end_over_peak(enh[:, take].mean(axis=1), topk)))
+    return np.asarray(out, float)
 
 
 def load_case(pid, a):
@@ -82,20 +108,27 @@ def load_case(pid, a):
     n = img.GetSize()[3] if img.GetDimension() > 3 else 1
     t = np.asarray([np.nan if p.get("rel_time_s") is None else p["rel_time_s"]
                     for p in meta["phases"]], float)
-    if len(t) != n or not usable_times(t) or n < 4:
+    if n < 4:
+        print(f"    skipped: only {n} phase(s); not a dynamic series", flush=True)
+        return None
+    if len(t) != n or not usable_times(t):
+        print("    skipped: timestamps unusable", flush=True)
         return None
 
-    gland = sitk.GetArrayFromImage(
-        sitk.ReadImage(os.path.join(a.main_root, pid, "prostate_mask.nii.gz"))) > 0
+    gimg = sitk.ReadImage(os.path.join(a.main_root, pid, "prostate_mask.nii.gz"))
+    gland = sitk.GetArrayFromImage(gimg) > 0
+    spacing_zyx = np.asarray(gimg.GetSpacing(), float)[::-1]     # (z, y, x) mm
     lesp = sitk.GetArrayFromImage(
         sitk.ReadImage(os.path.join(a.main_root, pid, a.lesion_file)))
     zpath = os.path.join(a.main_root, pid, "prostate_zones.nii.gz")
     zones = sitk.GetArrayFromImage(sitk.ReadImage(zpath)) if os.path.exists(zpath) else None
     if gland.shape != lesp.shape or not gland.any():
+        print("    skipped: gland/lesion shape mismatch or empty gland", flush=True)
         return None
 
     lesion = lesp >= a.lesion_thresh
     if not lesion.any():
+        print(f"    skipped: no lesion voxel >= {a.lesion_thresh}", flush=True)
         return None
     frac_outside = float((lesion & ~gland).sum()) / float(lesion.sum())
 
@@ -114,6 +147,9 @@ def load_case(pid, a):
         sel["TZ"] = gland & ~grown & (zones == a.tz_label)
         sel["PZ"] = gland & ~grown & (zones == a.pz_label)
     if sel["lesion"].sum() < a.min_lesion_voxels or sel["normal"].sum() < a.min_lesion_voxels:
+        print(f"    skipped: lesion {int(sel['lesion'].sum())}vx / normal "
+              f"{int(sel['normal'].sum())}vx below --min-lesion-voxels "
+              f"{a.min_lesion_voxels}", flush=True)
         return None
 
     # pull every phase once, restricted to the gland-or-lesion support
@@ -125,8 +161,15 @@ def load_case(pid, a):
     idx = {k: v[sup] for k, v in sel.items()}
 
     curves = {k: enh[:, m].mean(axis=1) for k, m in idx.items() if m.any()}
-    vox_ratio = {k: end_over_peak(enh[:, m]) for k, m in idx.items() if m.any()}
-    return dict(pid=pid, t=t, n=n, curves=curves, vox_ratio=vox_ratio,
+    vox_ratio = {k: end_over_peak(enh[:, m], a.peak_topk) for k, m in idx.items() if m.any()}
+
+    # THE CONTROL: same voxel count, same contiguity, normal tissue.
+    coords = np.argwhere(sup)
+    null = matched_null(enh, coords, np.where(idx["normal"])[0],
+                        int(idx["lesion"].sum()), spacing_zyx, a.n_null,
+                        np.random.default_rng(a.seed), a.peak_topk)
+
+    return dict(pid=pid, t=t, n=n, curves=curves, vox_ratio=vox_ratio, null=null,
                 nvox={k: int(m.sum()) for k, m in idx.items()},
                 frac_outside=frac_outside, series=str(meta.get("series", "?")))
 
@@ -146,6 +189,12 @@ def main(argv=None):
                     help="CHOSEN: floor for a stable per-region mean")
     ap.add_argument("--tz-label", type=int, default=1, help="manifest says 1=TZ")
     ap.add_argument("--pz-label", type=int, default=2, help="manifest says 2=PZ")
+    ap.add_argument("--n-null", type=int, default=20,
+                    help="size-matched contiguous normal ROIs drawn per case")
+    ap.add_argument("--peak-topk", type=int, default=3,
+                    help="average top-k phases for peak / last-k for end, to blunt "
+                         "the max() noise bias that scales with ROI size")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-gb", type=float, default=3.0,
                     help="skip a 4D series whose in-RAM size exceeds this")
     ap.add_argument("--n", type=int, default=60, help="cases to analyse")
@@ -181,12 +230,16 @@ def main(argv=None):
             skipped += 1
             continue
         cases.append(c)
-        lr = end_over_peak(c["curves"]["lesion"])
-        nr = end_over_peak(c["curves"]["normal"])
+        lr = end_over_peak(c["curves"]["lesion"], a.peak_topk)
+        nr = end_over_peak(c["curves"]["normal"], a.peak_topk)
+        nul = c["null"][np.isfinite(c["null"])]
+        nm = float(np.median(nul)) if len(nul) else np.nan
+        pct = float((nul <= lr).mean() * 100) if len(nul) else np.nan
         print(f"    -> n={c['n']:3d} span={c['t'][-1]:5.0f}s  "
               f"lesion {c['nvox']['lesion']:6d}vx end/peak={lr:5.2f}  "
-              f"normal end/peak={nr:5.2f}  diff={lr-nr:+5.2f}  "
-              f"outside gland={c['frac_outside']:.0%}", flush=True)
+              f"normal={nr:5.2f}  size-matched null={nm:5.2f} "
+              f"(lesion at {pct:3.0f}th pct)  diff_vs_null={lr-nm:+5.2f}  "
+              f"outside={c['frac_outside']:.0%}", flush=True)
 
     if not cases:
         print("  no usable cases")
@@ -218,10 +271,12 @@ def main(argv=None):
     print(f"  wrote {a.out}")
 
     # ---- cohort summary --------------------------------------------------
-    lr = np.array([end_over_peak(c["curves"]["lesion"]) for c in cases], float)
-    nr = np.array([end_over_peak(c["curves"]["normal"]) for c in cases], float)
-    ok = np.isfinite(lr) & np.isfinite(nr)
-    lr, nr = lr[ok], nr[ok]
+    lr = np.array([end_over_peak(c["curves"]["lesion"], a.peak_topk) for c in cases], float)
+    nr = np.array([end_over_peak(c["curves"]["normal"], a.peak_topk) for c in cases], float)
+    nu = np.array([np.nanmedian(c["null"]) if np.isfinite(c["null"]).any() else np.nan
+                   for c in cases], float)
+    ok = np.isfinite(lr) & np.isfinite(nr) & np.isfinite(nu)
+    lr, nr, nu = lr[ok], nr[ok], nu[ok]
 
     fig, ax = plt.subplots(1, 3, figsize=(16, 4.6))
 
@@ -249,14 +304,18 @@ def main(argv=None):
                     f"(n={len(stacks['normal'])})", fontsize=9)
     ax[0].set_xlabel("seconds since phase 0"); ax[0].legend(); ax[0].grid(alpha=0.3)
 
-    # (b) paired end/peak
-    ax[1].scatter(nr, lr, s=14, alpha=0.6)
-    lim = [min(nr.min(), lr.min()) - 0.05, max(nr.max(), lr.max()) + 0.05]
+    # (b) lesion against the SIZE-MATCHED null, which is the comparison that
+    #     survives the ROI-size noise artifact
+    ax[1].scatter(nu, lr, s=16, alpha=0.65, label="vs size-matched null")
+    ax[1].scatter(nr, lr, s=10, alpha=0.35, marker="x", color="grey",
+                  label="vs whole-gland normal")
+    lim = [min(nu.min(), nr.min(), lr.min()) - 0.05,
+           max(nu.max(), nr.max(), lr.max()) + 0.05]
     ax[1].plot(lim, lim, "k--", lw=0.8)
-    ax[1].set_xlabel("normal end/peak"); ax[1].set_ylabel("lesion end/peak")
+    ax[1].set_xlabel("normal-tissue end/peak"); ax[1].set_ylabel("lesion end/peak")
     ax[1].set_title("paired within patient\nbelow the line = lesion washes out more",
                     fontsize=9)
-    ax[1].grid(alpha=0.3)
+    ax[1].legend(fontsize=7); ax[1].grid(alpha=0.3)
 
     # (c) per-voxel shape diversity, pooled
     for k, col in (("lesion", "r"), ("normal", "k")):
@@ -274,17 +333,22 @@ def main(argv=None):
     print(f"  wrote {a.out_summary}")
 
     # ---- the verdict -----------------------------------------------------
-    d = lr - nr
-    print(f"\n  === PAIRED end/peak, n={len(d)} ===")
-    print(f"    lesion  {lr.mean():.3f} +/- {lr.std():.3f}")
-    print(f"    normal  {nr.mean():.3f} +/- {nr.std():.3f}")
-    print(f"    diff    {d.mean():+.3f} +/- {d.std():.3f}   "
-          f"lesion lower in {int((d < 0).sum())}/{len(d)} ({100*(d<0).mean():.0f}%)")
-    try:
-        from scipy.stats import wilcoxon
-        print(f"    wilcoxon p = {wilcoxon(lr, nr).pvalue:.3g}")
-    except Exception:
-        pass
+    print(f"\n  === PAIRED end/peak, n={len(lr)} (peak_topk={a.peak_topk}) ===")
+    print(f"    lesion            {lr.mean():.3f} +/- {lr.std():.3f}")
+    print(f"    whole-gland normal{nr.mean():.3f} +/- {nr.std():.3f}   "
+          f"(~100k voxels: almost noise-free, NOT a fair comparison)")
+    print(f"    size-matched null {nu.mean():.3f} +/- {nu.std():.3f}   "
+          f"(same voxel count and contiguity, normal tissue)")
+    for nm, ref in (("vs whole-gland normal", nr), ("vs SIZE-MATCHED null", nu)):
+        d = lr - ref
+        line = (f"    {nm:22s} diff {d.mean():+.3f} +/- {d.std():.3f}  "
+                f"lower in {int((d < 0).sum())}/{len(d)} ({100*(d<0).mean():.0f}%)")
+        try:
+            from scipy.stats import wilcoxon
+            line += f"  p={wilcoxon(lr, ref).pvalue:.3g}"
+        except Exception:
+            pass
+        print(line)
 
     for k in ("lesion", "normal"):
         v = np.concatenate([c["vox_ratio"][k] for c in cases if k in c["vox_ratio"]])
@@ -297,20 +361,31 @@ def main(argv=None):
     fo = np.array([c["frac_outside"] for c in cases])
     print(f"\n    QC lesion voxels outside prostate mask: med {np.median(fo):.0%}, "
           f">50% outside in {int((fo > 0.5).sum())}/{len(fo)} cases")
-    print("\n    GO if lesions wash out relative to normal (diff < 0) and the")
-    print("    per-voxel IQR is wide. NO-GO if both regions are the same flat plateau.")
+    print("\n    GO if lesion end/peak sits below the SIZE-MATCHED null. The")
+    print("    whole-gland comparison is confounded: it averages ~100k voxels so")
+    print("    its max() is nearly unbiased, while a few-hundred-voxel lesion's is")
+    print("    not, which manufactures washout out of noise alone. Ignore the")
+    print("    per-voxel IQR entirely -- single-voxel curves are noise-dominated in")
+    print("    both regions, so it cannot separate biology from noise either way.")
 
     if a.csv:
         import csv
         with open(a.csv, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["pid", "n_phases", "span_s", "lesion_vox", "normal_vox",
-                        "lesion_end_peak", "normal_end_peak", "frac_outside_gland"])
+                        "lesion_end_peak", "normal_end_peak", "null_end_peak_med",
+                        "null_end_peak_p05", "lesion_pct_in_null",
+                        "frac_outside_gland"])
             for c in cases:
+                lv = float(end_over_peak(c["curves"]["lesion"], a.peak_topk))
+                nul = c["null"][np.isfinite(c["null"])]
                 w.writerow([c["pid"], c["n"], f"{c['t'][-1]:.1f}",
                             c["nvox"].get("lesion", 0), c["nvox"].get("normal", 0),
-                            f"{end_over_peak(c['curves']['lesion']):.4f}",
-                            f"{end_over_peak(c['curves']['normal']):.4f}",
+                            f"{lv:.4f}",
+                            f"{float(end_over_peak(c['curves']['normal'], a.peak_topk)):.4f}",
+                            f"{np.median(nul):.4f}" if len(nul) else "",
+                            f"{np.percentile(nul, 5):.4f}" if len(nul) else "",
+                            f"{(nul <= lv).mean()*100:.1f}" if len(nul) else "",
                             f"{c['frac_outside']:.4f}"])
         print(f"  wrote {a.csv}")
     return 0
