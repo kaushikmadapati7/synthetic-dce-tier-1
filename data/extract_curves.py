@@ -201,6 +201,9 @@ def main(argv=None):
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--n-shards", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--pids", nargs="*", default=[],
+                    help="run only these case ids; for exercising the lesion "
+                         "branch, which most cases do not reach")
     ap.add_argument("--overwrite", action="store_true")
     a = ap.parse_args(argv)
 
@@ -208,7 +211,13 @@ def main(argv=None):
     pids = sorted({os.path.relpath(f, a.dce_root).split(os.sep)[0]
                    for f in glob.glob(os.path.join(a.dce_root, "*", "DCE",
                                                    "DCE_4D_to_T2W.nii.gz"))})
-    pids = pids[a.shard::a.n_shards]
+    if a.pids:
+        missing = [p for p in a.pids if p not in set(pids)]
+        if missing:
+            print(f"  WARNING: no DCE_4D for {missing}", flush=True)
+        pids = [p for p in a.pids if p in set(pids)]
+    else:
+        pids = pids[a.shard::a.n_shards]
     if a.limit:
         pids = pids[:a.limit]
     print(f"  shard {a.shard}/{a.n_shards}: {len(pids)} cases -> {a.out_dir}",
